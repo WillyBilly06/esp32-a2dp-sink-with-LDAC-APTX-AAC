@@ -121,8 +121,6 @@ typedef struct {
     StackType_t* thread_stack;
     StaticTask_t thread_buffer;
     TaskHandle_t thread_handle;
-    bool wdt_yield;
-    time_t last_yield_ts;
 #else
     osi_thread_t        *btc_aa_snk_task_hdl;
 #endif
@@ -213,41 +211,17 @@ static bool btc_a2dp_sink_ctrl(uint32_t sig, void *param)
 #if CONFIG_BT_A2DP_DECODE_TASK
 static void btc_a2dp_sink_decode_thread(void* arg)
 {
-#if CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1
-    bool first = true;
-#endif
-
     for (;;) {
 
         if (osi_sem_take(&a2dp_sink_local_param.work_sem, OSI_SEM_MAX_TIMEOUT)) {
             continue;
         }
 
-#if CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1
-        if (first) {
-            a2dp_sink_local_param.last_yield_ts = time(NULL);
-            first = false;
-        }
-#endif
-
         btc_a2dp_sink_data_ready(NULL);
 
         if (fixed_queue_is_empty(a2dp_sink_local_param.btc_aa_snk_cb.RxSbcQ)) {
             continue;
         }
-
-#if CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1
-        if (a2dp_sink_local_param.wdt_yield) {
-            // Periodically yield to watchdog
-            time_t now = time(NULL);
-            const time_t timeout = ((CONFIG_ESP_TASK_WDT_TIMEOUT_S * 3 / 4) > 0) ?
-                                (CONFIG_ESP_TASK_WDT_TIMEOUT_S * 3 / 4) : 1;
-            if (now - a2dp_sink_local_param.last_yield_ts >= timeout) {
-                vTaskDelay(10 / portTICK_PERIOD_MS);
-                a2dp_sink_local_param.last_yield_ts = now;
-            }
-        }
-#endif
 
         osi_sem_give(&a2dp_sink_local_param.work_sem);
     }
@@ -536,14 +510,6 @@ static void btc_a2dp_sink_handle_decoder_reset(tBTC_MEDIA_SINK_CFG_UPDATE *p_msg
     if (a2dp_sink_local_param.decoder->decoder_configure){
         a2dp_sink_local_param.decoder->decoder_configure(p_msg->codec_info);
     }
-
-#if CONFIG_BT_A2DP_DECODE_TASK && CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1
-    a2dp_sink_local_param.wdt_yield = false;
-#if (defined(AAC_DEC_INCLUDED) && AAC_DEC_INCLUDED == TRUE)
-    btav_a2dp_codec_index_t idx = A2DP_SinkCodecIndex(p_msg->codec_info);
-    a2dp_sink_local_param.wdt_yield = idx == BTAV_A2DP_CODEC_INDEX_SINK_AAC;
-#endif
-#endif
 }
 
 /*******************************************************************************
