@@ -93,7 +93,7 @@ enum {
 #define A2DP_TASK_PRIO                   (BT_TASK_MAX_PRIORITIES - 6)
 #define A2DP_TASK_PINNED_TO_CORE         (1)
 #define A2DP_TASK_WORKQUEUE_NUM          (2)
-#define A2DP_TASK_WORKQUEUE0_LEN         (0)
+#define A2DP_TASK_WORKQUEUE0_LEN         (1)
 #define A2DP_TASK_WORKQUEUE1_LEN         (5)
 
 typedef struct {
@@ -170,9 +170,18 @@ static inline void btc_a2d_cb_to_app(esp_a2d_cb_event_t event, esp_a2d_cb_param_
  **  BTC ADAPTATION
  *****************************************************************************/
 
-static bool btc_a2dp_sink_ctrl(uint32_t sig, void *param)
+static void btc_a2dp_sink_ctrl(void *param)
 {
-    switch (sig) {
+    BT_HDR* p_buf = (BT_HDR*)param;
+
+    if (!p_buf) {
+        APPL_TRACE_ERROR("%s: p_buf is null", __func__);
+        return;
+    }
+
+    uint32_t sig = p_buf->event;
+
+    switch (p_buf->event) {
     case BTC_MEDIA_TASK_SINK_INIT:
         btc_a2dp_sink_thread_init(NULL);
         break;
@@ -195,8 +204,6 @@ static bool btc_a2dp_sink_ctrl(uint32_t sig, void *param)
     if (param != NULL) {
         osi_free(param);
     }
-
-    return true;
 }
 
 bool btc_a2dp_sink_startup(void)
@@ -240,9 +247,15 @@ bool btc_a2dp_sink_startup(void)
         goto error_exit;
     }
 
-    if (btc_a2dp_sink_ctrl(BTC_MEDIA_TASK_SINK_INIT, NULL) == false) {
+    BT_HDR *p_buf = (BT_HDR*)osi_malloc(sizeof(BT_HDR));
+    if (!p_buf) {
+        APPL_TRACE_ERROR("%s: no memory", __func__);
         goto error_exit;
     }
+
+    p_buf->event = BTC_MEDIA_TASK_SINK_INIT;
+    osi_thread_post(a2dp_sink_local_param.btc_aa_snk_task_hdl,
+                    btc_a2dp_sink_ctrl, p_buf, 0, OSI_THREAD_MAX_TIMEOUT);
 
     APPL_TRACE_EVENT("## A2DP SINK MEDIA THREAD STARTED ##\n");
 
@@ -273,7 +286,14 @@ void btc_a2dp_sink_shutdown(void)
 
     osi_thread_free(a2dp_sink_local_param.btc_aa_snk_task_hdl);
 
-    btc_a2dp_sink_ctrl(BTC_MEDIA_TASK_SINK_CLEAN_UP, NULL);
+    BT_HDR *p_buf = (BT_HDR*)osi_malloc(sizeof(BT_HDR));
+    if (p_buf) {
+        p_buf->event = BTC_MEDIA_TASK_SINK_CLEAN_UP;
+        osi_thread_post(a2dp_sink_local_param.btc_aa_snk_task_hdl,
+                        btc_a2dp_sink_ctrl, p_buf, 0, OSI_THREAD_MAX_TIMEOUT);
+    }
+
+    APPL_TRACE_EVENT("## A2DP SINK MEDIA THREAD STARTED ##\n");
 
     a2dp_sink_local_param.btc_aa_snk_task_hdl = NULL;
 
@@ -340,7 +360,16 @@ void btc_a2dp_sink_on_suspended(tBTA_AV_SUSPEND *p_av)
  *******************************************************************************/
 static BOOLEAN btc_a2dp_sink_clear_track(void)
 {
-    return btc_a2dp_sink_ctrl(BTC_MEDIA_AUDIO_SINK_CLEAR_TRACK, NULL);
+    BT_HDR *p_buf = (BT_HDR*)osi_malloc(sizeof(BT_HDR));
+    if (!p_buf) {
+        APPL_TRACE_ERROR("%s: no memory", __func__);
+        return false;
+    }
+
+    p_buf->event = BTC_MEDIA_AUDIO_SINK_CLEAR_TRACK;
+    osi_thread_post(a2dp_sink_local_param.btc_aa_snk_task_hdl,
+                    btc_a2dp_sink_ctrl, p_buf, 0, OSI_THREAD_MAX_TIMEOUT);
+    return true;
 }
 
 /* when true media task discards any rx frames */
@@ -372,13 +401,16 @@ void btc_a2dp_sink_reset_decoder(UINT8 *p_av)
                      p_av[4], p_av[5], p_av[6]);
 
     tBTC_MEDIA_SINK_CFG_UPDATE *p_buf;
-    if (NULL == (p_buf = osi_malloc(sizeof(tBTC_MEDIA_SINK_CFG_UPDATE)))) {
-        APPL_TRACE_ERROR("btc reset decoder No Buffer ");
+    p_buf = osi_malloc(sizeof(tBTC_MEDIA_SINK_CFG_UPDATE));
+    if (!p_buf) {
+        APPL_TRACE_ERROR("%s: no memory", __func__);
         return;
     }
 
+    p_buf->hdr.event = BTC_MEDIA_AUDIO_SINK_CFG_UPDATE;
     memcpy(p_buf->codec_info, p_av, AVDT_CODEC_SIZE);
-    btc_a2dp_sink_ctrl(BTC_MEDIA_AUDIO_SINK_CFG_UPDATE, p_buf);
+    osi_thread_post(a2dp_sink_local_param.btc_aa_snk_task_hdl,
+                    btc_a2dp_sink_ctrl, p_buf, 0, OSI_THREAD_MAX_TIMEOUT);
 }
 
 static void btc_a2dp_sink_data_ready(UNUSED_ATTR void *context)
@@ -522,7 +554,16 @@ BOOLEAN btc_a2dp_sink_rx_flush_req(void)
         return TRUE;
     }
 
-    return btc_a2dp_sink_ctrl(BTC_MEDIA_FLUSH_AA_RX, NULL);
+    BT_HDR *p_buf = (BT_HDR*)osi_malloc(sizeof(BT_HDR));
+    if (!p_buf) {
+        APPL_TRACE_ERROR("%s: no memory", __func__);
+        return false;
+    }
+
+    p_buf->event = BTC_MEDIA_FLUSH_AA_RX;
+    osi_thread_post(a2dp_sink_local_param.btc_aa_snk_task_hdl,
+                    btc_a2dp_sink_ctrl, p_buf, 0, OSI_THREAD_MAX_TIMEOUT);
+    return true;
 }
 
 /*******************************************************************************
