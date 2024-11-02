@@ -13,7 +13,7 @@
 #include "osi/allocator.h"
 #include "osi/future.h"
 
-#define DECODE_BUF_LEN (8 * 1024)
+#define DECODE_BUF_LEN (4 * 1024)
 
 typedef struct {
   HANDLE_AACDECODER aac_handle;
