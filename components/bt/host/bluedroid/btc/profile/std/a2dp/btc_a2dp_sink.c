@@ -297,11 +297,6 @@ void btc_a2dp_sink_shutdown(void)
 
     a2dp_sink_local_param.btc_aa_snk_task_hdl = NULL;
 
-    if (a2dp_sink_local_param.decoder && a2dp_sink_local_param.decoder->decoder_cleanup) {
-        a2dp_sink_local_param.decoder->decoder_cleanup();
-        a2dp_sink_local_param.decoder = NULL;
-    }
-
 #if A2D_DYNAMIC_MEMORY == TRUE
     osi_free(a2dp_sink_local_param_ptr);
     a2dp_sink_local_param_ptr = NULL;
@@ -661,6 +656,12 @@ static void btc_a2dp_sink_thread_init(UNUSED_ATTR void *context)
 
 static void btc_a2dp_sink_thread_cleanup(UNUSED_ATTR void *context)
 {
+
+    if (a2dp_sink_local_param.decoder && a2dp_sink_local_param.decoder->decoder_cleanup) {
+        a2dp_sink_local_param.decoder->decoder_cleanup();
+        a2dp_sink_local_param.decoder = NULL;
+    }
+
     btc_a2dp_control_set_datachnl_stat(FALSE);
     /* Clear task flag */
     btc_a2dp_sink_state = BTC_A2DP_SINK_STATE_OFF;
