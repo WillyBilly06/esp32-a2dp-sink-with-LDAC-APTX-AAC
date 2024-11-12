@@ -51,7 +51,7 @@ static const tA2DP_LDAC_CIE a2dp_ldac_default_config = {
 
 static const tA2DP_DECODER_INTERFACE a2dp_decoder_interface_ldac = {
     a2dp_ldac_decoder_init,
-    NULL,  // decoder_cleanup,
+    a2dp_ldac_decoder_cleanup,
     NULL,  // decoder_reset,
     a2dp_ldac_decoder_decode_packet_header,
     a2dp_ldac_decoder_decode_packet,

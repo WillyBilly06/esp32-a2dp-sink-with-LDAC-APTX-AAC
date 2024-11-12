@@ -34,6 +34,9 @@ extern "C"
 ******************************************************************************/
 bool a2dp_ldac_decoder_init(decoded_data_callback_t decode_callback);
 
+
+void a2dp_ldac_decoder_cleanup();
+
 /******************************************************************************
 **
 ** Function         a2dp_ldac_decoder_decode_packet_header

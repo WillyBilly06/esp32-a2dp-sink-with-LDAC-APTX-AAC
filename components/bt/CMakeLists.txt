@@ -760,7 +760,7 @@ if(CONFIG_BT_A2DP_LDAC_DECODER)
     list(APPEND srcs ${ldac_dec_srcs})
 
     list(APPEND srcs "host/bluedroid/stack/a2dp/a2dp_vendor_ldac.c"
-                     "host/bluedroid/stack/a2dp/a2dp_vendor_ldac_decoder.c")
+                     "host/bluedroid/stack/a2dp/a2dp_vendor_ldacbt_decoder.c")
 endif()
 
 if(CONFIG_BT_A2DP_OPUS_DECODER)
