@@ -8,6 +8,8 @@ Supported codecs:
  * Opus 05 (PipeWire)
  * LC3plus HR
 
+ See [a2dp-codec-tests](https://github.com/cfint/a2dp-codec-tests) for an evaluation of codec performance.
+
 ## Requirements
 
 The original ESP32-WROOM is the only ESP32 chip that supports Bluetooth A2DP.
