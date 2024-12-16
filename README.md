@@ -27,6 +27,8 @@ Add additional codecs to `components/bt/host/bluedroid/external/` in esp-idf.
     *  Add submodule to `components/bt/host/bluedroid/external/libfreeaptx`
 *  `idf_component` branch @ https://github.com/cfint/arduino-fdk-aac
     * Add submodule to `components/bt/host/bluedroid/external/arduino-fdk-aac`
+*  `esp32` branch @ https://github.com/cfint/libldac-dec
+    * Add submodule to `components/bt/host/bluedroid/external/libldac-dec`
 
 Build this project as you would an esp-idf project.
 
