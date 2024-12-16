@@ -749,6 +749,11 @@ if(CONFIG_BT_A2DP_APTX_DECODER)
 endif()
 
 if(CONFIG_BT_A2DP_LDAC_DECODER)
+    list(APPEND priv_include_dirs host/bluedroid/external/libldac-dec/src
+                                  host/bluedroid/external/libldac-dec/inc)
+    list(APPEND ldacbt_dec_srcs "host/bluedroid/external/libldac-dec/src/ldacBT.c"
+                                "host/bluedroid/external/libldac-dec/src/ldaclib.c")
+    list(APPEND srcs ${ldacbt_dec_srcs})
 
     list(APPEND srcs "host/bluedroid/stack/a2dp/a2dp_vendor_ldac.c"
                      "host/bluedroid/stack/a2dp/a2dp_vendor_ldacbt_decoder.c")
