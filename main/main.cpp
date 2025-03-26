@@ -17,6 +17,7 @@ extern "C" void app_main(void)
     out.begin(i2s_config);
     // out.end();
 
+    a2dp_sink.set_auto_reconnect(true);
     a2dp_sink.set_task_core(0);
     a2dp_sink.start("ESP_SPEAKER");
 }
