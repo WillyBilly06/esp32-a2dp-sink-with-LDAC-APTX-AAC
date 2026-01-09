@@ -53,12 +53,31 @@ A high-quality Bluetooth audio receiver (A2DP sink) for ESP32 with support for p
 
 ### Build & Flash
 
+#### Windows
+```cmd
+cd C:\esp-idf
+install.bat
+export.bat
+
+cd C:\your-project-folder
+idf.py set-target esp32
+idf.py build
+idf.py -p COM3 flash monitor
+```
+
+#### Linux/macOS
 ```bash
-. ~/esp-idf/export.sh
+cd ~/esp-idf
+./install.sh
+. ./export.sh
+
+cd ~/your-project-folder
 idf.py set-target esp32
 idf.py build
 idf.py -p /dev/ttyUSB0 flash monitor
 ```
+
+> 💡 Replace `COM3` or `/dev/ttyUSB0` with your actual serial port.
 
 ## 🎛️ BLE GATT Services
 
