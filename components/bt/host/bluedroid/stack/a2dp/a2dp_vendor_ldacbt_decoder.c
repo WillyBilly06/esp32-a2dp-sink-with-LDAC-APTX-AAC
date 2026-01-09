@@ -78,7 +78,17 @@ bool a2dp_ldac_decoder_decode_packet(BT_HDR* p_buf, unsigned char* buf, size_t b
 
     int result = 0;
 
+    /* Patched: Check buffer space BEFORE decoding to prevent overflow */
+    /* LDAC decodes 256 samples per frame, max 32-bit stereo = 2048 bytes */
+    const size_t max_frame_output = 256 * 4 * 2;
+
     while ((in_count - in_used) > 0) {
+        /* Check if we have room for at least one more decoded frame */
+        if ((size_t)(buf_len - out_count) < max_frame_output) {
+            LOG_WARN("%s: buffer nearly full, stopping decode.", __func__);
+            break;
+        }
+
         result = ldacBT_decode(hndl,
                                src + in_used,
                                buf + out_count,

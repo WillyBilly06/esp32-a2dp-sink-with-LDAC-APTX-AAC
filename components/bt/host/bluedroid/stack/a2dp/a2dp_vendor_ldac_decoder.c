@@ -32,8 +32,9 @@ bool a2dp_ldac_decoder_init(decoded_data_callback_t decode_callback) {
 }
 
 ssize_t a2dp_ldac_decoder_decode_packet_header(BT_HDR* p_buf) {
-    size_t header_len = sizeof(struct media_packet_header) +
-                        A2DP_LDAC_MPL_HDR_LEN;
+    const size_t header_len = 12 + 1;
+
+
     p_buf->offset += header_len;
     p_buf->len -= header_len;
     return 0;
@@ -48,7 +49,7 @@ static bool find_sync_word(unsigned char** buf, int *size) {
     return (*size) > 0;
 }
 
-
+/* -------------- PATCHED FUNCTION -------------- */
 bool a2dp_ldac_decoder_decode_packet(BT_HDR* p_buf, unsigned char* buf, size_t buf_len) {
     ldacdec_t* decoder = &a2dp_ldac_decoder_cb.decoder;
     int ret;
@@ -58,37 +59,63 @@ bool a2dp_ldac_decoder_decode_packet(BT_HDR* p_buf, unsigned char* buf, size_t b
     unsigned char* dst = buf;
     int32_t avail = buf_len;
 
-    while (src_size > 0 && avail > 0) {
-        int bytes_used;
-        int out_size;
+    /* processed > 0 ensures we stop if the last decode consumed 0 bytes */
+    int32_t processed = -1;
+
+    while (src_size > 0 && avail > 0 && processed > 0) {
+        int bytes_used = 0;
+        int out_size   = 0;
+        processed      = 0;
 
         if (!find_sync_word(&src, &src_size)) {
             break;
         }
 
-        ret = ldacDecode(decoder, src, (void*)dst, &bytes_used);
+        ret = ldacDecode(decoder, src, (void *)dst, &bytes_used);
         if (ret != 0) {
             APPL_TRACE_ERROR("%s: decoder error %d", __func__, ret);
             return false;
         }
-        src += bytes_used;
-        src_size -= bytes_used;
+
+        /* --- critical fix: stop if decoder didn’t consume anything --- */
+        if (bytes_used <= 0) {
+            LOG_ERROR("%s: decoder returned 0 bytes, stopping to avoid infinite loop.",
+                      __func__);
+            break;
+        }
+
+        processed  = bytes_used;
+        src       += bytes_used;
+        src_size  -= bytes_used;
 
         frame_t *frame = &decoder->frame;
         out_size = frame->frameSamples * frame->channelCount * sizeof(int16_t);
-        dst += out_size;
+
+        /* extra safety: don’t overflow output buffer */
+        if (out_size <= 0 || out_size > avail) {
+            LOG_ERROR("%s: Insufficient output buffer size. frame=%d avail=%d",
+                      __func__, out_size, avail);
+            break;
+        }
+
+        dst   += out_size;
         avail -= out_size;
     }
 
     if (src_size > 0 && avail <= 0) {
-        LOG_ERROR("%s: Insufficient output buffer size. %d bytes remain.", __func__, src_size);
+        LOG_ERROR("%s: Insufficient output buffer size. %d bytes remain.",
+                  __func__, src_size);
     }
 
     size_t len = buf_len - avail;
-    len = len <= buf_len ? len : buf_len;
+    if (len > buf_len) {
+        len = buf_len;
+    }
+
     a2dp_ldac_decoder_cb.decode_callback((uint8_t*)buf, len);
-    return true;    
+    return true;
 }
+/* -------------- END PATCH -------------- */
 
 void a2dp_ldac_decoder_configure(const uint8_t* p_codec_info) {
     tA2DP_LDAC_CIE cie;
