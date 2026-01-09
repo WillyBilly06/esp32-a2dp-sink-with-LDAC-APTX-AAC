@@ -3,14 +3,16 @@
 nvs,      data, nvs,     0x9000,  0x6000,
 phy_init, data, phy,     0xF000,  0x1000,
 
-# App slots (8MB flash): 3 app partitions @ 0x240000 (2.25MB) each
+# Two-partition OTA scheme (8MB flash):
+#   - ota_0: primary app partition
+#   - ota_1: secondary app partition for OTA updates
+# OTA alternates between ota_0 and ota_1.
 # NOTE: app partition offsets must be 0x10000-aligned.
-factory,  app,  factory, 0x10000, 0x240000,
-ota_0,    app,  ota_0,   0x250000, 0x240000,
-ota_1,    app,  ota_1,   0x490000, 0x240000,
+ota_0,    app,  ota_0,   0x10000,  0x300000,
+ota_1,    app,  ota_1,   0x310000, 0x300000,
 
-# OTA data (can be located anywhere in flash)
-otadata,  data, ota,     0x6D0000, 0x2000,
+# OTA data (stores boot partition state for rollback)
+otadata,  data, ota,     0x610000, 0x2000,
 
-# Filesystem
-spiffs,   data, spiffs,  0x6D2000, 0x12E000,
+# Filesystem (expanded with freed space from ota_1 removal)
+spiffs,   data, spiffs,  0x612000, 0x1EE000,

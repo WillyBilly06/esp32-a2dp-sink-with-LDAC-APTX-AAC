@@ -51,13 +51,19 @@ bool IdfUpdate::begin(size_t size, const char *label) {
             return false;
         }
     } else {
+        // Standard 2-partition OTA scheme (ota_0 + ota_1).
+        // esp_ota_get_next_update_partition() automatically selects the other partition.
         const esp_partition_t *running = esp_ota_get_running_partition();
-        part = esp_ota_get_next_update_partition(running);
+        part = esp_ota_get_next_update_partition(NULL);
+        
         if (!part) {
-            ESP_LOGE(TAG_UPDATE, "esp_ota_get_next_update_partition failed");
+            ESP_LOGE(TAG_UPDATE, "No OTA partition found for update");
             abort_(UPDATE_ERROR_NO_PARTITION);
             return false;
         }
+        
+        ESP_LOGI(TAG_UPDATE, "Running from '%s', OTA target is '%s'", 
+                 running ? running->label : "unknown", part->label);
     }
 
     if (_expectedSize > part->size) {
