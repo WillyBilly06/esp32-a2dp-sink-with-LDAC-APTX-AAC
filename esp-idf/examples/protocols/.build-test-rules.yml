@@ -1,0 +1,188 @@
+# Documentation: .gitlab/ci/README.md#manifest-file-to-control-the-buildtest-apps
+
+examples/protocols/coap_client:
+  disable_test:
+    - if: IDF_TARGET != "esp32"
+      reason: running this test on single platform is sufficient for coverage
+
+
+examples/protocols/esp_http_client:
+  enable:
+    - if: INCLUDE_DEFAULT == 1 or IDF_TARGET == "linux"
+  disable_test:
+    - if: IDF_TARGET not in ["esp32", "linux"]
+      temporary: true
+      reason: only test on esp32
+
+examples/protocols/esp_local_ctrl:
+  disable:
+    - if: IDF_TARGET in ["esp32h2"]
+  disable_test:
+    - if: IDF_TARGET not in ["esp32", "esp32c3", "esp32s3"]
+      temporary: true
+      reason: lack of runners
+
+examples/protocols/http2_request:
+  disable_test:
+    - if: IDF_TARGET != "esp32"
+      temporary: true
+      reason: only test on esp32
+
+examples/protocols/http_request:
+  disable_test:
+    - if: IDF_TARGET != "esp32"
+      temporary: true
+      reason: only test on esp32
+
+examples/protocols/http_server:
+  disable_test:
+    - if: IDF_TARGET not in ["esp32", "esp32c3", "esp32s3"]
+      temporary: true
+      reason: lack of runners
+
+examples/protocols/http_server/captive_portal:
+  disable:
+    - if: IDF_TARGET in ["esp32h2"]
+  disable_test:
+    - if: IDF_TARGET != "esp32"
+      temporary: true
+      reason: only test on esp32
+
+examples/protocols/http_server/restful_server:
+  disable:
+    - if: IDF_TARGET in ["esp32h2"]
+
+examples/protocols/http_server/ws_echo_server:
+  disable_test:
+    - if: IDF_TARGET != "esp32"
+      temporary: true
+      reason: only test on esp32
+
+examples/protocols/https_mbedtls:
+  disable_test:
+    - if: IDF_TARGET != "esp32"
+      temporary: true
+      reason: lack of runners
+
+examples/protocols/https_request:
+  disable_test:
+    - if: IDF_TARGET != "esp32"
+      temporary: true
+      reason: lack of runners
+
+examples/protocols/https_server/simple:
+  disable_test:
+    - if: IDF_TARGET not in ["esp32", "esp32c3", "esp32s3"]
+      temporary: true
+      reason: lack of runners
+
+examples/protocols/https_server/wss_server:
+  disable_test:
+    - if: IDF_TARGET != "esp32"
+      temporary: true
+      reason: only test on esp32
+
+examples/protocols/https_x509_bundle:
+  disable_test:
+    - if: IDF_TARGET != "esp32"
+      temporary: true
+      reason: lack of runners
+
+examples/protocols/icmp_echo:
+  disable_test:
+    - if: IDF_TARGET not in ["esp32", "esp32c3", "esp32s3"]
+      temporary: true
+      reason: lack of runners
+
+examples/protocols/l2tap:
+  disable_test:
+    - if: IDF_TARGET != "esp32"
+      temporary: true
+      reason: lack of runners
+
+examples/protocols/mqtt/ssl:
+  disable_test:
+    - if: IDF_TARGET != "esp32"
+      temporary: true
+      reason: lack of runners
+
+examples/protocols/mqtt/ssl_ds:
+  disable:
+    - if: SOC_DIG_SIGN_SUPPORTED != 1
+      temporary: false
+      reason: DS not present
+
+examples/protocols/mqtt/tcp:
+  disable_test:
+    - if: IDF_TARGET != "esp32"
+      temporary: true
+      reason: lack of runners
+
+examples/protocols/mqtt/ws:
+  disable_test:
+    - if: IDF_TARGET != "esp32"
+      temporary: true
+      reason: lack of runners
+
+examples/protocols/mqtt/wss:
+  disable_test:
+    - if: IDF_TARGET != "esp32"
+      temporary: true
+      reason: lack of runners
+
+examples/protocols/mqtt5:
+  disable_test:
+    - if: IDF_TARGET != "esp32"
+      temporary: true
+      reason: lack of runners
+
+examples/protocols/slip/slip_udp:
+  disable:
+    - if: IDF_TARGET == "esp32c2"
+      temporary: true
+      reason: target esp32c2 is not supported yet
+
+examples/protocols/sntp:
+  enable:
+    - if: IDF_TARGET == "esp32"
+      temporary: true
+      reason: the other targets are not tested yet
+
+
+examples/protocols/sockets/non_blocking:
+  disable_test:
+    - if: IDF_TARGET != "esp32"
+      temporary: true
+      reason: lack of runners
+
+examples/protocols/sockets/tcp_client:
+  disable_test:
+    - if: IDF_TARGET not in ["esp32", "esp32c3", "esp32s3"]
+      temporary: true
+      reason: lack of runners
+  enable:
+    - if: INCLUDE_DEFAULT == 1 or IDF_TARGET == "linux"
+
+
+examples/protocols/sockets/tcp_server:
+  disable_test:
+    - if: IDF_TARGET not in ["esp32", "esp32c3", "esp32s3"]
+      temporary: true
+      reason: lack of runners
+
+
+examples/protocols/sockets/udp_client:
+  disable_test:
+    - if: IDF_TARGET not in ["esp32", "esp32c3", "esp32s3"]
+      temporary: true
+      reason: lack of runners
+
+examples/protocols/sockets/udp_server:
+  disable_test:
+    - if: IDF_TARGET not in ["esp32", "esp32c3", "esp32s3"]
+      temporary: true
+      reason: lack of runners
+
+examples/protocols/static_ip:
+  disable:
+    - if: IDF_TARGET in ["esp32h2"]

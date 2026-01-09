@@ -1,0 +1,22 @@
+# Python package requirements for ESP-IDF. These are the so called core features which are installed in all systems.
+
+setuptools
+packaging
+# importlib_metadata: is part of python3.8 and newer as importlib.metadata
+importlib_metadata; python_version < "3.8"
+click
+pyserial
+cryptography
+pyparsing
+pyelftools
+idf-component-manager
+esp-coredump
+esptool
+esp-idf-kconfig
+esp-idf-monitor
+esp-idf-size
+esp-idf-panic-decoder
+construct
+
+# gdb extensions dependencies
+freertos_gdb
