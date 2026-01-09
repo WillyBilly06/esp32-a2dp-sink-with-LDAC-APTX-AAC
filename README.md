@@ -111,15 +111,21 @@ git clone -b esp32 https://github.com/cfint/libldac-dec libldac-dec
 
 ```cmd
 :: Setup ESP-IDF environment
-cd C:\esp-idf
+cd D:\esp-idf
 install.bat
 export.bat
 
 :: Build and flash
-cd C:\path\to\project
+cd D:\path\to\project
 idf.py set-target esp32
 idf.py build
-idf.py -p COM3 flash monitor
+idf.py -p COM10 flash
+```
+
+**Flash to both OTA partitions** (recommended for OTA reliability):
+```cmd
+:: Flash ota_0 (0x10000) and ota_1 (0x310000)
+python -m esptool -p COM10 -b 460800 --chip esp32 write_flash 0x10000 build/app-template.bin 0x310000 build/app-template.bin
 ```
 
 </details>
@@ -137,12 +143,20 @@ cd ~/esp-idf
 cd ~/path/to/project
 idf.py set-target esp32
 idf.py build
-idf.py -p /dev/ttyUSB0 flash monitor
+idf.py -p /dev/ttyUSB0 flash
+```
+
+**Flash to both OTA partitions** (recommended for OTA reliability):
+```bash
+# Flash ota_0 (0x10000) and ota_1 (0x310000)
+python -m esptool -p /dev/ttyUSB0 -b 460800 --chip esp32 write_flash 0x10000 build/app-template.bin 0x310000 build/app-template.bin
 ```
 
 </details>
 
-> 💡 **Tip**: Replace `COM3` or `/dev/ttyUSB0` with your actual serial port.
+> 💡 **Tip**: Replace `COM10` or `/dev/ttyUSB0` with your actual serial port.
+> 
+> 💡 **Why flash both partitions?** The device uses A/B OTA with two app partitions (`ota_0` and `ota_1`). Flashing both ensures a known-good firmware in both slots. OTA updates alternate between partitions, so if one fails, the device rolls back to the other.
 
 ---
 
