@@ -18,6 +18,7 @@
 - [Supported Codecs](#-supported-codecs)
 - [Hardware Requirements](#-hardware-requirements)
 - [Installation](#-installation)
+- [Building from Source](#️-building-from-source)
 - [BLE GATT Services](#-ble-gatt-services)
 - [Configuration](#-configuration)
 - [Troubleshooting](#-troubleshooting)
@@ -80,6 +81,46 @@
 ---
 
 ## 📦 Installation
+
+### Quick Start (Pre-built Firmware)
+
+Download the latest release and flash directly to your ESP32:
+
+<details>
+<summary><b>🪟 Windows</b></summary>
+
+```cmd
+:: Install esptool if not already installed
+pip install esptool
+
+:: Flash firmware (replace COM10 with your port)
+python -m esptool -p COM10 -b 460800 --chip esp32 write_flash 0x10000 app-template.bin 0x310000 app-template.bin
+```
+
+</details>
+
+<details>
+<summary><b>🐧 Linux / 🍎 macOS</b></summary>
+
+```bash
+# Install esptool if not already installed
+pip install esptool
+
+# Flash firmware (replace /dev/ttyUSB0 with your port)
+python -m esptool -p /dev/ttyUSB0 -b 460800 --chip esp32 write_flash 0x10000 app-template.bin 0x310000 app-template.bin
+```
+
+</details>
+
+> 💡 **Tip**: Replace `COM10` or `/dev/ttyUSB0` with your actual serial port.
+> 
+> 💡 **Why flash both partitions?** The device uses A/B OTA with two app partitions (`ota_0` and `ota_1`). Flashing both ensures a known-good firmware in both slots. OTA updates alternate between partitions, so if one fails, the device rolls back to the other.
+
+---
+
+## 🛠️ Building from Source
+
+If you want to customize the firmware or build your own, follow these steps:
 
 ### Step 1: Clone ESP-IDF with Codec Support
 
@@ -153,10 +194,6 @@ python -m esptool -p /dev/ttyUSB0 -b 460800 --chip esp32 write_flash 0x10000 bui
 ```
 
 </details>
-
-> 💡 **Tip**: Replace `COM10` or `/dev/ttyUSB0` with your actual serial port.
-> 
-> 💡 **Why flash both partitions?** The device uses A/B OTA with two app partitions (`ota_0` and `ota_1`). Flashing both ensures a known-good firmware in both slots. OTA updates alternate between partitions, so if one fails, the device rolls back to the other.
 
 ---
 
