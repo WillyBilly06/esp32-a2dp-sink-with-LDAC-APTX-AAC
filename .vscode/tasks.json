@@ -1,0 +1,21 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "ESP-IDF Build",
+			"type": "shell",
+			"command": "cmd /c \"cd /d D:\\esp32-a2dp-sink && D:\\esp-idf\\export.bat && idf.py build\"",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "ESP-IDF Build 2",
+			"type": "shell",
+			"command": "cmd /c \"D:\\esp-idf\\export.bat & idf.py build\"",
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "build"
+		}
+	]
+}
