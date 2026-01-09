@@ -1,5 +1,16 @@
-# ESP-IDF Partition Table
+# ESP-IDF Partition Table,,,,,
 # Name,   Type, SubType, Offset,  Size, Flags
 nvs,      data, nvs,     0x9000,  0x6000,
-phy_init, data, phy,     0xf000,  0x1000,
-factory,  app,  factory, 0x10000, 2M,
+phy_init, data, phy,     0xF000,  0x1000,
+
+# App slots (8MB flash): 3 app partitions @ 0x240000 (2.25MB) each
+# NOTE: app partition offsets must be 0x10000-aligned.
+factory,  app,  factory, 0x10000, 0x240000,
+ota_0,    app,  ota_0,   0x250000, 0x240000,
+ota_1,    app,  ota_1,   0x490000, 0x240000,
+
+# OTA data (can be located anywhere in flash)
+otadata,  data, ota,     0x6D0000, 0x2000,
+
+# Filesystem
+spiffs,   data, spiffs,  0x6D2000, 0x12E000,
