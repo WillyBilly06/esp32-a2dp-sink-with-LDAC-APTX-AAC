@@ -250,10 +250,3 @@ This project builds upon the excellent work of the open-source community:
 ## 📄 License
 
 This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
-
----
-
-<p align="center">
-  <sub>Built with ❤️ for audiophiles who demand the best</sub><br>
-  <sub>⭐ Star this repo if you find it useful!</sub>
-</p>
