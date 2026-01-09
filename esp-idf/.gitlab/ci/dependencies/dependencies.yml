@@ -1,0 +1,206 @@
+.all_targets: &all_targets
+  - esp32
+  - esp32s2
+  - esp32s3
+  - esp32c3
+  - esp32c2
+  - esp32c6
+  - esp32h2
+
+.target_test: &target_test
+  - example_test
+  - custom_test
+  - unit_test
+  - component_ut
+
+##############
+# Build Jobs #
+##############
+"build":
+  labels:
+    - build
+  patterns:
+    - build_components
+    - build_system
+    - downloadable-tools
+  included_in:
+    - build:target_test
+
+# -------------------
+# Specific Build Jobs
+# -------------------
+"build:docker":
+  labels:
+    - build
+    - docker
+  patterns:
+    - docker
+    - submodule
+    - build_system
+    - downloadable-tools
+
+"build:windows":
+  labels:
+    - build
+    - windows
+  patterns:
+    - build_system
+    - windows
+
+"build:macos":
+  labels:
+    - build
+    - macos
+    - macos_test  # for backward compatibility
+  patterns:
+    - build_system
+    - macos
+    - downloadable-tools
+
+# ---------------
+# Build Test Jobs
+# ---------------
+"build:{0}-{1}":
+  matrix:
+    - *target_test
+    - *all_targets
+  labels:
+    - build
+  patterns:
+    - build_components
+    - build_system
+    - build_target_test
+    - downloadable-tools
+  included_in:
+    - "build:{0}"
+    - build:target_test
+
+####################
+# Target Test Jobs #
+####################
+"test:{0}-{1}":
+  matrix:
+    - *target_test
+    - *all_targets
+  labels: # For each rule, use labels <test_type> and <test_type>-<target>
+    - "{0}"
+    - "{0}_{1}"
+    - target_test
+  patterns: # For each rule, use patterns <test_type> and build-<test_type>
+    - "{0}"
+    - "build-{0}"
+  included_in: # Parent rules
+    - "build:{0}"
+    - "build:{0}-{1}"
+    - build:target_test
+
+# -------------
+# Special Cases
+# -------------
+"test:component_ut-{0}": # component_ut will trigger by unit_test as well, since now we have 2 kinds of UT
+  matrix:
+    - *all_targets
+  labels:
+    - component_ut
+    - "component_ut_{0}"
+    - unit_test
+    - "unit_test_{0}"
+    - target_test
+  patterns:
+    - component_ut
+    - "build-component_ut-{0}"
+  included_in:
+    - build:component_ut
+    - "build:component_ut-{0}"
+    - build:target_test
+
+# To reduce the specific runners' usage.
+# Do not create these jobs by default patterns on development branches
+# Can be triggered by labels or related changes
+"test:{0}-{1}-{2}":
+  matrix:
+    - *target_test
+    - *all_targets
+    - - bt        # example_test_005
+      - wifi      # pytest*wifi*
+      - ethernet  # pytest*ethernet*
+      - sdio      # pytest*sdio*
+      - usb       # USB Device & Host tests
+      - adc       # pytest*adc*
+      - i154
+      - flash_multi
+      - ecdsa
+      - ccs811    # pytest*ccs811*
+  patterns:
+    - "{0}-{1}-{2}"
+    - "{0}-{2}"
+    - "target_test-{2}"
+  labels:
+    - "{0}_{1}"
+    - "{0}"
+    - target_test
+  included_in:
+    - "build:{0}-{1}"
+    - "build:{0}"
+    - build:target_test
+
+# For example_test*flash_encryption_wifi_high_traffic jobs
+# set `INCLUDE_NIGHTLY_RUN` variable when triggered on development branches
+"test:example_test-{0}-include_nightly_run-rule":
+  matrix:
+    - - esp32
+      - esp32c3
+  specific_rules:
+    - "if-example_test-ota-include_nightly_run-rule"
+  included_in:
+    - "build:example_test-{0}"
+    - "build:example_test"
+    - build:target_test
+
+# For i154 runners
+"test:example_test-i154":
+  patterns:
+    - "example_test-i154"
+    - "target_test-i154"
+  labels:
+    - target_test
+    - example_test
+  included_in:
+    - "build:example_test-esp32s3"
+    - "build:example_test-esp32c6"
+    - "build:example_test-esp32h2"
+    - "build:example_test"
+    - build:target_test
+
+# For openthread sleepy
+"test:example_test-otsleepy":
+  patterns:
+    - "example_test-otsleepy"
+    - "target_test-i154"
+  labels:
+    - target_test
+    - example_test
+  included_in:
+    - "build:example_test-esp32c6"
+    - "build:example_test-esp32h2"
+    - "build:example_test"
+    - build:target_test
+
+"test:host_test":
+  labels:
+    - host_test
+  patterns:
+    - host_test
+
+"test:submodule":
+  labels:
+    - submodule
+  patterns:
+    - submodule
+
+#################################
+# Triggered Only By Labels Jobs #
+#################################
+"labels:nvs_coverage": # host_test
+  labels:
+    - nvs_coverage
