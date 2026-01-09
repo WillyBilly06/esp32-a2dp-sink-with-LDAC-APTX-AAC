@@ -18,6 +18,7 @@
 #include "nvs.h"
 
 #include "esp_ota_ops.h"
+#include "esp_task_wdt.h"
 
 #include "idf_update.h"
 
@@ -159,6 +160,18 @@ static inline T clamp_value(U x, V lo, V hi) {
 // -----------------------------------------------------------
 
 static BluetoothA2DPSink a2dp_sink;
+
+// Helper function to get codec name from type
+static const char* get_codec_name(esp_a2d_mct_t type) {
+    switch (type) {
+        case ESP_A2D_MCT_SBC:      return "SBC";
+        case ESP_A2D_MCT_M12:      return "MPEG-1/2";
+        case ESP_A2D_MCT_M24:      return "AAC";
+        case ESP_A2D_MCT_ATRAC:    return "ATRAC";
+        case ESP_A2D_MCT_NON_A2DP: return "Vendor (LDAC/aptX/aptX-HD/aptX-LL)";
+        default:                   return "Unknown";
+    }
+}
 
 static uint32_t g_sample_rate     = I2S_DEFAULT_SR;
 static uint8_t  g_bits_per_sample = 16;   // codec/PCM bits coming from BT stack
@@ -404,6 +417,8 @@ static float smooth60_dB  = -120.0f;
 static float smooth100_dB = -120.0f;
 
 static const float FFT_SMOOTH_ALPHA = 0.2f;
+static const float LEVEL_DECAY_ALPHA = 0.85f;  // Decay factor when no audio
+static volatile uint32_t g_last_audio_process_ms = 0;  // Track last audio processing time
 
 // beat detector state
 static float bassAvg    = 0.0f;
@@ -497,6 +512,10 @@ static bool otaInProgress     = false;
 static size_t otaExpectedSize = 0;
 static size_t otaReceivedBytes= 0;
 static bool otaActive         = false;
+static size_t otaLastAckOffset = 0;  // Last acknowledged offset for flow control
+
+// Flow control: send ACK every 4KB to prevent phone from overwhelming ESP32
+static constexpr size_t OTA_ACK_INTERVAL = 4096;
 
 static IdfUpdate g_update;
 
@@ -866,8 +885,12 @@ static void i2s_update_clock(uint32_t sample_rate) {
 // -----------------------------------------------------------
 
 static void codec_config_cb(uint32_t rate, uint8_t bps, uint8_t channels) {
-    ESP_LOGI(TAG, ">>> CODEC CONFIG: rate=%u, bits=%u, ch=%u (prev sr=%u)",
-             (unsigned)rate, (unsigned)bps, (unsigned)channels, (unsigned)g_sample_rate);
+    // Get the current codec type
+    esp_a2d_mct_t codec_type = a2dp_sink.get_audio_type();
+    const char* codec_name = get_codec_name(codec_type);
+    
+    ESP_LOGI(TAG, ">>> CODEC CONFIG: codec=%s (0x%02X), rate=%u, bits=%u, ch=%u",
+             codec_name, codec_type, (unsigned)rate, (unsigned)bps, (unsigned)channels);
 
     uint32_t new_rate = (rate != 0) ? rate : I2S_DEFAULT_SR;
     uint8_t new_bps = bps;
@@ -1110,6 +1133,7 @@ static void ota_reset_state() {
     otaExpectedSize    = 0;
     otaReceivedBytes   = 0;
     otaActive          = false;
+    otaLastAckOffset   = 0;
     if (g_update.isRunning()) {
         g_update.abort();
     }
@@ -1158,6 +1182,7 @@ static void handleOtaCtrlWrite(const uint8_t *data, uint16_t len) {
         otaInProgress    = true;
         otaReceivedBytes = 0;
         otaActive        = true;
+        otaLastAckOffset = 0;
 
         if (otaPrebeginOverflow) {
             ESP_LOGW(TAG, "OTA: pre-BEGIN buffer overflowed; some bytes were dropped");
@@ -1189,10 +1214,54 @@ static void handleOtaCtrlWrite(const uint8_t *data, uint16_t len) {
     }
 
     if (cmd == "END") {
-        ESP_LOGI(TAG, "OTA END received");
+        ESP_LOGI(TAG, "OTA END received (received=%u, expected=%u)", 
+                 (unsigned)otaReceivedBytes, (unsigned)otaExpectedSize);
         if (!otaInProgress) {
             ESP_LOGW(TAG, "OTA END but no OTA in progress");
             otaActive = false;
+            return;
+        }
+
+        // If bytes don't match, wait for in-flight packets to arrive
+        // BLE Write-Without-Response can have packets still in transit when END arrives
+        if (otaReceivedBytes != otaExpectedSize) {
+            ESP_LOGW(TAG, "OTA: byte count mismatch, waiting for in-flight packets...");
+            
+            // Wait up to 2 seconds for remaining packets, checking every 50ms
+            size_t lastReceived = otaReceivedBytes;
+            int waitCount = 0;
+            const int maxWaitMs = 2000;
+            const int checkIntervalMs = 50;
+            const int maxWaitIterations = maxWaitMs / checkIntervalMs;
+            
+            while (otaReceivedBytes < otaExpectedSize && waitCount < maxWaitIterations) {
+                vTaskDelay(pdMS_TO_TICKS(checkIntervalMs));
+                waitCount++;
+                
+                // If we received more data, reset the wait counter (packet arrived)
+                if (otaReceivedBytes > lastReceived) {
+                    ESP_LOGI(TAG, "OTA: received more data (%u -> %u), continuing to wait...",
+                             (unsigned)lastReceived, (unsigned)otaReceivedBytes);
+                    lastReceived = otaReceivedBytes;
+                    waitCount = 0;  // Reset wait since we're still receiving
+                }
+            }
+            
+            ESP_LOGI(TAG, "OTA: after wait, received=%u, expected=%u",
+                     (unsigned)otaReceivedBytes, (unsigned)otaExpectedSize);
+        }
+
+        // Final verification after waiting
+        if (otaReceivedBytes != otaExpectedSize) {
+            ESP_LOGE(TAG, "OTA: byte count mismatch after wait! received=%u expected=%u (missing %d bytes)",
+                     (unsigned)otaReceivedBytes, (unsigned)otaExpectedSize,
+                     (int)(otaExpectedSize - otaReceivedBytes));
+            char errBuf[64];
+            snprintf(errBuf, sizeof(errBuf), "SIZE_ERR:%u/%u", 
+                     (unsigned)otaReceivedBytes, (unsigned)otaExpectedSize);
+            ble_notify_ota_ctrl(errBuf);
+            g_update.abort();
+            ota_reset_state();
             return;
         }
 
@@ -1226,6 +1295,23 @@ static void handleOtaCtrlWrite(const uint8_t *data, uint16_t len) {
 static void handleOtaDataWrite(const uint8_t *data, uint16_t len) {
     if (!data || len == 0) return;
 
+    // Check if this looks like a control command (some apps send everything to DATA char)
+    // Commands are ASCII text starting with "BEGIN:", "END", or "ABORT"
+    if (len < 100) {  // Commands are short
+        std::string maybeCmd((const char *)data, len);
+        // Trim whitespace
+        size_t s = maybeCmd.find_first_not_of(" \r\n\t");
+        size_t e = maybeCmd.find_last_not_of(" \r\n\t");
+        if (s != std::string::npos) {
+            maybeCmd = maybeCmd.substr(s, e - s + 1);
+            if (maybeCmd.rfind("BEGIN:", 0) == 0 || maybeCmd == "END" || maybeCmd == "ABORT") {
+                ESP_LOGI(TAG, "OTA DATA: detected command '%s', forwarding to CTRL handler", maybeCmd.c_str());
+                handleOtaCtrlWrite(data, len);
+                return;
+            }
+        }
+    }
+
     // Allow early DATA before BEGIN by buffering a small window.
     if (!otaInProgress || !otaActive) {
         if (!ota_prebegin_ensure_buf()) {
@@ -1251,17 +1337,20 @@ static void handleOtaDataWrite(const uint8_t *data, uint16_t len) {
 
     otaReceivedBytes += w;
 
-    static size_t lastNotified = 0;
-    if ((otaReceivedBytes - lastNotified) >= 4096 || otaReceivedBytes == otaExpectedSize) {
-        lastNotified = otaReceivedBytes;
-        char buf[32];
-        snprintf(buf, sizeof(buf), "PROG:%u/%u",
-                 (unsigned)otaReceivedBytes, (unsigned)otaExpectedSize);
+    // Send progress notification for flow control and UI updates
+    // Format: "PROGRESS:bytes/total:percent" - phone can use this for progress bar
+    if ((otaReceivedBytes - otaLastAckOffset) >= OTA_ACK_INTERVAL || otaReceivedBytes == otaExpectedSize) {
+        otaLastAckOffset = otaReceivedBytes;
+        int percent = (otaExpectedSize > 0) ? (int)((otaReceivedBytes * 100) / otaExpectedSize) : 0;
+        char buf[64];
+        snprintf(buf, sizeof(buf), "PROGRESS:%u/%u:%d", 
+                 (unsigned)otaReceivedBytes, (unsigned)otaExpectedSize, percent);
         ble_notify_ota_ctrl(buf);
     }
 
-    ESP_LOGI(TAG, "OTA progress: %u / %u",
-             (unsigned)otaReceivedBytes, (unsigned)otaExpectedSize);
+    ESP_LOGI(TAG, "OTA progress: %u / %u (%d%%)",
+             (unsigned)otaReceivedBytes, (unsigned)otaExpectedSize,
+             (otaExpectedSize > 0) ? (int)((otaReceivedBytes * 100) / otaExpectedSize) : 0);
 }
 
 // -----------------------------------------------------------
@@ -1836,7 +1925,8 @@ QueueHandle_t g_audio_free_queue = NULL;
 
 // Reduce pool/buffer sizes to lower latency (fewer, smaller chunks)
 // Increase pool to handle large LDAC decoder output while still using PSRAM
-static const int AUDIO_POOL_COUNT = 12;
+// 48 buffers @ 8KB = 384KB in PSRAM - enough to absorb LDAC burst without drops
+static const int AUDIO_POOL_COUNT = 48;
 static const size_t AUDIO_POOL_BUF_SIZE = 8192; // bytes per buffer
 
 struct AudioBuf {
@@ -1982,9 +2072,17 @@ static void a2dp_audio_state_changed(esp_a2d_audio_state_t state, void *user) {
         if (g_i2s_initialized) {
             i2s_zero_dma_buffer(I2S_PORT);
         }
+        // Zero level meters immediately
+        smooth30_dB = -120.0f;
+        smooth60_dB = -120.0f;
+        smooth100_dB = -120.0f;
         break;
     case ESP_A2D_AUDIO_STATE_REMOTE_SUSPEND:
         ESP_LOGI(TAG, "A2DP audio SUSPENDED");
+        // Zero level meters immediately
+        smooth30_dB = -120.0f;
+        smooth60_dB = -120.0f;
+        smooth100_dB = -120.0f;
         break;
     default:
         break;
@@ -2113,14 +2211,30 @@ static void beat_task(void *arg) {
             // BLE spectrum levels every 50ms
             if (now - lastSpectrumPrintMs >= LEVELS_UPDATE_MS) {
                 lastSpectrumPrintMs = now;
+                
+                // Check if audio has stopped (no processing for > 100ms)
+                uint32_t timeSinceAudio = now - g_last_audio_process_ms;
+                bool audioStopped = (timeSinceAudio > 100);
 
                 float d30  = g30_dB;
                 float d60  = g60_dB;
                 float d100 = g100_dB;
-
-                smooth30_dB  += FFT_SMOOTH_ALPHA * (d30  - smooth30_dB);
-                smooth60_dB  += FFT_SMOOTH_ALPHA * (d60  - smooth60_dB);
-                smooth100_dB += FFT_SMOOTH_ALPHA * (d100 - smooth100_dB);
+                
+                // If audio stopped, decay levels toward -120 dB
+                if (audioStopped) {
+                    smooth30_dB  = smooth30_dB  * LEVEL_DECAY_ALPHA + (-120.0f) * (1.0f - LEVEL_DECAY_ALPHA);
+                    smooth60_dB  = smooth60_dB  * LEVEL_DECAY_ALPHA + (-120.0f) * (1.0f - LEVEL_DECAY_ALPHA);
+                    smooth100_dB = smooth100_dB * LEVEL_DECAY_ALPHA + (-120.0f) * (1.0f - LEVEL_DECAY_ALPHA);
+                    
+                    // Reset Goertzel values to silence when audio stops
+                    g30_dB  = -120.0f;
+                    g60_dB  = -120.0f;
+                    g100_dB = -120.0f;
+                } else {
+                    smooth30_dB  += FFT_SMOOTH_ALPHA * (d30  - smooth30_dB);
+                    smooth60_dB  += FFT_SMOOTH_ALPHA * (d60  - smooth60_dB);
+                    smooth100_dB += FFT_SMOOTH_ALPHA * (d100 - smooth100_dB);
+                }
 
                 auto dbToPos = [](float dB) -> int {
                     int v = (int)roundf((dB + 120.0f) * 0.67f);
@@ -2148,9 +2262,13 @@ static void beat_task(void *arg) {
 // (audio pool and queue defined earlier)
 
 static void audio_tx_task(void *arg) {
+    // Track iterations for periodic yield to feed IDLE watchdog
+    uint32_t iter_count = 0;
+    
     while (true) {
         AudioBuf *buf = NULL;
-        if (xQueueReceive(g_audio_queue, &buf, portMAX_DELAY) == pdTRUE && buf != NULL) {
+        // Use timeout instead of portMAX_DELAY to allow periodic yields
+        if (xQueueReceive(g_audio_queue, &buf, pdMS_TO_TICKS(10)) == pdTRUE && buf != NULL) {
             // Convert and write to I2S (32-bit stereo container)
             uint32_t len = buf->len;
             uint8_t bits = buf->bits;
@@ -2183,39 +2301,52 @@ static void audio_tx_task(void *arg) {
                         float L = (float)l_raw / 32768.0f;
                         float R = (float)r_raw / 32768.0f;
                         
+                        // Create mono mix for processing
+                        float mono = (L + R) * 0.5f;
+                        
                         // EQ always applies (regardless of bypass)
                         applyEQ(L, R);
                         
-                        // Bass boost always applies (regardless of bypass)
-                        if (doBassBoost) {
-                            float mono = (L + R) * 0.5f;
-                            lp_state += lp_alpha * (mono - lp_state);
-                            float bass = lp_state;
-                            float boostedBass = processSample(bassShelfL, bass) * BASS_GAIN_BOOST;
-                            float highPart = mono - bass;
-                            float mixed = boostedBass + highPart * TREBLE_GAIN;
-                            L = mixed;
-                            R = mixed;
-                        }
-                        
-                        // Goertzel analysis BEFORE crossover (so we analyze full audio, not filtered)
+                        // Goertzel analysis BEFORE any processing (analyze original audio)
                         if (doAnalysis) {
-                            float mono = (L + R) * 0.5f;
                             goertzelProcessSample(mono);
                         }
                         
                         // Crossover split-ear mode only when NOT bypassed
-                        // Channel flip controls which ear gets LP vs HP
                         if (!doBypass) {
-                            float mono = (L + R) * 0.5f; // Use mono for crossover source
+                            // Apply crossover to mono mix
+                            float lpOut = processSample(crossoverLPL, mono);
+                            float hpOut = processSample(crossoverHPR, mono);
+                            
+                            // Apply bass boost only to LP (subwoofer) channel
+                            if (doBassBoost) {
+                                lp_state += lp_alpha * (lpOut - lp_state);
+                                float bass = lp_state;
+                                float boostedBass = processSample(bassShelfL, bass) * BASS_GAIN_BOOST;
+                                float highPart = lpOut - bass;
+                                lpOut = boostedBass + highPart * TREBLE_GAIN;
+                            }
+                            
+                            // Channel flip controls which ear gets LP vs HP
                             if (!doFlip) {
-                                // Normal: Left = LP 90Hz, Right = HP 500Hz
-                                L = processSample(crossoverLPL, mono);
-                                R = processSample(crossoverHPR, mono);
+                                // Normal: Left = LP (subwoofer), Right = HP (mids/highs)
+                                L = lpOut;
+                                R = hpOut;
                             } else {
-                                // Flipped: Left = HP 500Hz, Right = LP 90Hz
-                                L = processSample(crossoverHPL, mono);
-                                R = processSample(crossoverLPR, mono);
+                                // Flipped: Left = HP (mids/highs), Right = LP (subwoofer)
+                                L = hpOut;
+                                R = lpOut;
+                            }
+                        } else {
+                            // Bypass mode: full-range stereo with optional bass boost
+                            if (doBassBoost) {
+                                lp_state += lp_alpha * (mono - lp_state);
+                                float bass = lp_state;
+                                float boostedBass = processSample(bassShelfL, bass) * BASS_GAIN_BOOST;
+                                float highPart = mono - bass;
+                                float mixed = boostedBass + highPart * TREBLE_GAIN;
+                                L = mixed;
+                                R = mixed;
                             }
                         }
                         
@@ -2241,39 +2372,52 @@ static void audio_tx_task(void *arg) {
                         float L = (float)l_raw / 2147483648.0f;
                         float R = (float)r_raw / 2147483648.0f;
                         
+                        // Create mono mix for processing
+                        float mono = (L + R) * 0.5f;
+                        
                         // EQ always applies (regardless of bypass)
                         applyEQ(L, R);
                         
-                        // Bass boost always applies (regardless of bypass)
-                        if (doBassBoost) {
-                            float mono = (L + R) * 0.5f;
-                            lp_state += lp_alpha * (mono - lp_state);
-                            float bass = lp_state;
-                            float boostedBass = processSample(bassShelfL, bass) * BASS_GAIN_BOOST;
-                            float highPart = mono - bass;
-                            float mixed = boostedBass + highPart * TREBLE_GAIN;
-                            L = mixed;
-                            R = mixed;
-                        }
-                        
-                        // Goertzel analysis BEFORE crossover (so we analyze full audio, not filtered)
+                        // Goertzel analysis BEFORE any processing (analyze original audio)
                         if (doAnalysis) {
-                            float mono = (L + R) * 0.5f;
                             goertzelProcessSample(mono);
                         }
                         
                         // Crossover split-ear mode only when NOT bypassed
-                        // Channel flip controls which ear gets LP vs HP
                         if (!doBypass) {
-                            float mono = (L + R) * 0.5f; // Use mono for crossover source
+                            // Apply crossover to mono mix
+                            float lpOut = processSample(crossoverLPL, mono);
+                            float hpOut = processSample(crossoverHPR, mono);
+                            
+                            // Apply bass boost only to LP (subwoofer) channel
+                            if (doBassBoost) {
+                                lp_state += lp_alpha * (lpOut - lp_state);
+                                float bass = lp_state;
+                                float boostedBass = processSample(bassShelfL, bass) * BASS_GAIN_BOOST;
+                                float highPart = lpOut - bass;
+                                lpOut = boostedBass + highPart * TREBLE_GAIN;
+                            }
+                            
+                            // Channel flip controls which ear gets LP vs HP
                             if (!doFlip) {
-                                // Normal: Left = LP 90Hz, Right = HP 500Hz
-                                L = processSample(crossoverLPL, mono);
-                                R = processSample(crossoverHPR, mono);
+                                // Normal: Left = LP (subwoofer), Right = HP (mids/highs)
+                                L = lpOut;
+                                R = hpOut;
                             } else {
-                                // Flipped: Left = HP 500Hz, Right = LP 90Hz
-                                L = processSample(crossoverHPL, mono);
-                                R = processSample(crossoverLPR, mono);
+                                // Flipped: Left = HP (mids/highs), Right = LP (subwoofer)
+                                L = hpOut;
+                                R = lpOut;
+                            }
+                        } else {
+                            // Bypass mode: full-range stereo with optional bass boost
+                            if (doBassBoost) {
+                                lp_state += lp_alpha * (mono - lp_state);
+                                float bass = lp_state;
+                                float boostedBass = processSample(bassShelfL, bass) * BASS_GAIN_BOOST;
+                                float highPart = mono - bass;
+                                float mixed = boostedBass + highPart * TREBLE_GAIN;
+                                L = mixed;
+                                R = mixed;
                             }
                         }
                         
@@ -2295,6 +2439,10 @@ static void audio_tx_task(void *arg) {
                 if (g_i2s_mutex) xSemaphoreTake(g_i2s_mutex, portMAX_DELAY);
                 i2s_write(I2S_PORT, dsp_out32, bytes_to_write, &written, portMAX_DELAY);
                 if (g_i2s_mutex) xSemaphoreGive(g_i2s_mutex);
+                
+                // Update last audio processing timestamp for level meter decay
+                g_last_audio_process_ms = millis32();
+                
                     if (written < bytes_to_write) {
                         g_tx_short_write_count = g_tx_short_write_count + 1;
                         if ((g_tx_short_write_count % LOG_EVERY) == 0) {
@@ -2308,6 +2456,15 @@ static void audio_tx_task(void *arg) {
 
             // return buffer to free pool
             xQueueSend(g_audio_free_queue, &buf, 0);
+            
+            // Yield periodically to let IDLE task run and feed watchdog
+            iter_count++;
+            if ((iter_count & 0x0F) == 0) {
+                taskYIELD();
+            }
+        } else {
+            // No buffer available - yield to other tasks
+            taskYIELD();
         }
     }
 }
@@ -2325,6 +2482,43 @@ extern "C" void app_main(void) {
     }
 
     ESP_LOGI(TAG, "Booting BDK speaker (ESP-IDF + A2DP + BLE GATT + DSP)...");
+
+    // OTA Rollback validation: mark app as valid to cancel rollback on next boot.
+    // If app is in "pending verify" state (just OTA'd), this confirms it booted OK.
+    // Factory partition (recovery) is never marked this way - it's always valid.
+    {
+        const esp_partition_t *running = esp_ota_get_running_partition();
+        esp_ota_img_states_t state;
+        if (esp_ota_get_state_partition(running, &state) == ESP_OK) {
+            ESP_LOGI(TAG, "Running partition '%s', state=%d", running->label, (int)state);
+            if (state == ESP_OTA_IMG_PENDING_VERIFY) {
+                // New OTA firmware booted successfully - mark as valid
+                ESP_LOGI(TAG, "OTA: confirming app is valid (canceling rollback)");
+                esp_ota_mark_app_valid_cancel_rollback();
+            }
+        } else {
+            ESP_LOGI(TAG, "Running partition '%s' (factory or no OTA state)", running->label);
+        }
+    }
+    
+    // Log compiled codec support
+    ESP_LOGI(TAG, "Compiled A2DP codec support:");
+    ESP_LOGI(TAG, "  - SBC: always enabled");
+#ifdef CONFIG_BT_A2DP_AAC_DECODER
+    ESP_LOGI(TAG, "  - AAC: enabled");
+#else
+    ESP_LOGW(TAG, "  - AAC: DISABLED");
+#endif
+#ifdef CONFIG_BT_A2DP_APTX_DECODER
+    ESP_LOGI(TAG, "  - aptX/aptX-HD/aptX-LL: enabled");
+#else
+    ESP_LOGW(TAG, "  - aptX/aptX-HD/aptX-LL: DISABLED");
+#endif
+#ifdef CONFIG_BT_A2DP_LDAC_DECODER
+    ESP_LOGI(TAG, "  - LDAC: enabled");
+#else
+    ESP_LOGW(TAG, "  - LDAC: DISABLED");
+#endif
 
     // Load settings
     loadSettingsFromNVS();
@@ -2419,7 +2613,10 @@ extern "C" void app_main(void) {
                 xQueueSend(g_audio_free_queue, &p, 0);
             }
 
-            // Increase priority to favor timely audio TX and reduce backlog
+            // High priority (15) to drain queue quickly and prevent packet drops
+            // Pinned to core 1 to avoid contention with BT stack on core 0
+            // Priority 10: lower than BT stack (12-16) to avoid starving IDLE watchdog
+            // but still high enough for good audio performance
             xTaskCreatePinnedToCore(audio_tx_task, "audio_tx", 8192, NULL, 10, NULL, 1);
         }
     }
