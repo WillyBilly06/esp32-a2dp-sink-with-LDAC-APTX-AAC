@@ -1,6 +1,0 @@
-menu "Test-app Configuration"
-
-    config TEST_MEMPROT
-        bool "Enable memprot test"
-
-endmenu

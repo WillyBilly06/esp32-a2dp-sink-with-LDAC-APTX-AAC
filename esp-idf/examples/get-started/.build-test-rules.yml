@@ -1,5 +1,0 @@
-# Documentation: .gitlab/ci/README.md#manifest-file-to-control-the-buildtest-apps
-
-examples/get-started/hello_world:
-  enable:
-    - if: INCLUDE_DEFAULT == 1
