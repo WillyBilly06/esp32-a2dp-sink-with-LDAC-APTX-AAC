@@ -1,7 +1,0 @@
-.*
-!.gitignore
-!.github
-bin
-build
-test/build
-*__pycache__

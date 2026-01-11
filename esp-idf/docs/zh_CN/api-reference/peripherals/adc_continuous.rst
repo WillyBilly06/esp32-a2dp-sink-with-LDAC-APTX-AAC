@@ -1,1 +1,0 @@
-.. include:: ../../../en/api-reference/peripherals/adc_continuous.rst

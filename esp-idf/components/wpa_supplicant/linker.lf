@@ -1,5 +1,0 @@
-[mapping:wpa_supplicant]
-archive: libwpa_supplicant.a
-entries:
-    if ESP_ALLOW_BSS_SEG_EXTERNAL_MEMORY = y:
-        * (extram_bss)

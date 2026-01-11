@@ -1,7 +1,0 @@
-menu "Example Configuration"
-    config EXAMPLE_ENABLE_STREAMING
-        bool "Enable streaming"
-        default n
-        help
-            Enables streaming of captured video
-endmenu
