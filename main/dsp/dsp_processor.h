@@ -80,38 +80,24 @@ private:
     // - Tanh-style soft clipping = gentle saturation instead of hard clip
     // - Much lower CPU usage than compressor
     // - Preserves transients and dynamics better
+    // - Threshold raised to 0.98 to avoid bass distortion
     // -----------------------------------------------------------
     struct SoftClipper {
-        float threshold = 0.85f;     // Start soft-clipping above this (linear)
+        float threshold = 0.98f;     // Start soft-clipping above this (linear) - raised from 0.85 to avoid bass crackle
         float ceiling = 1.0f;        // Maximum output level
         
         void init(float /* sampleRate */) {
             // No state to initialize - pure memoryless function
         }
         
-        // Soft clip a single sample using cubic soft-clip curve
-        // Below threshold: linear pass-through
-        // Above threshold: smooth saturation curve approaching ceiling
+        // Soft clip a single sample - only clips extreme peaks
+        // Below threshold: linear pass-through (99% of audio)
+        // Above threshold: hard limit to ceiling (rare peaks only)
         inline float softClip(float x) {
-            float sign = x >= 0.0f ? 1.0f : -1.0f;
-            float absX = x * sign;
-            
-            if (absX <= threshold) {
-                return x;  // Below threshold: pass through
-            }
-            
-            // Cubic soft-clip: smooth transition from threshold to ceiling
-            // y = threshold + (ceiling - threshold) * tanh((x - threshold) / (ceiling - threshold))
-            // Simplified approximation using rational function (faster than tanh)
-            float excess = absX - threshold;
-            float headroom = ceiling - threshold;
-            float t = excess / headroom;  // Normalized excess [0, inf)
-            
-            // Approximation: t / (1 + t) maps [0,inf) -> [0,1)
-            // This gives smooth saturation curve
-            float compressed = headroom * t / (1.0f + t);
-            
-            return sign * (threshold + compressed);
+            // Simple hard limit at ceiling - cleaner than soft saturation for bass
+            if (x > ceiling) return ceiling;
+            if (x < -ceiling) return -ceiling;
+            return x;
         }
         
         // Process stereo pair
