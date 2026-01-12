@@ -14,8 +14,8 @@
 
 ##  Table of Contents
 
-- [Features](#-features)
-- [Supported Codecs](#-supported-codecs)
+- [Features](#features)
+- [Supported Codecs](#supported-codecs)
 - [Hardware Requirements](#-hardware-requirements)
 - [Installation](#-installation)
 - [Building from Source](#️-building-from-source)
