@@ -12,7 +12,7 @@
 
 ---
 
-## 📋 Table of Contents
+##  Table of Contents
 
 - [Features](#-features)
 - [Supported Codecs](#-supported-codecs)
@@ -27,13 +27,13 @@
 
 ---
 
-## ✨ Features
+##  Features
 
 <table>
 <tr>
 <td width="50%">
 
-### 🎵 Audio
+###  Audio
 - **Hi-Res LDAC** streaming up to 96kHz/24-bit
 - **aptX HD/aptX/aptX-LL** for low latency
 - **AAC** for Apple device compatibility
@@ -42,7 +42,7 @@
 </td>
 <td width="50%">
 
-### 📱 Connectivity
+###  Connectivity
 - **BLE GATT** remote control
 - Real-time **level meters**
 - **3-band EQ** adjustment
@@ -54,7 +54,7 @@
 
 ---
 
-## 🎵 Supported Codecs
+##  Supported Codecs
 
 | Codec | Bitrate | Sample Rate | Latency | Use Case |
 |:------|:-------:|:-----------:|:-------:|:---------|
@@ -76,18 +76,18 @@
 | **Flash** | 8MB | Enables OTA dual partition |
 | **DAC** | I2S compatible | PCM5102, MAX98357A, etc. |
 
-> ⚠️ **Important**: Bluetooth Classic A2DP is only supported on the original ESP32 chip.
+>  **Important**: Bluetooth Classic A2DP is only supported on the original ESP32 chip.
 
 ---
 
-## 📦 Installation
+##  Installation
 
 ### Quick Start (Pre-built Firmware)
 
 Download the latest release and flash directly to your ESP32:
 
 <details>
-<summary><b>🪟 Windows</b></summary>
+<summary><b> Windows</b></summary>
 
 ```cmd
 :: Install esptool if not already installed
@@ -100,7 +100,7 @@ python -m esptool -p COM10 -b 460800 --chip esp32 write_flash 0x10000 app-templa
 </details>
 
 <details>
-<summary><b>🐧 Linux / 🍎 macOS</b></summary>
+<summary><b> Linux /  macOS</b></summary>
 
 ```bash
 # Install esptool if not already installed
@@ -112,9 +112,9 @@ python -m esptool -p /dev/ttyUSB0 -b 460800 --chip esp32 write_flash 0x10000 app
 
 </details>
 
-> 💡 **Tip**: Replace `COM10` or `/dev/ttyUSB0` with your actual serial port.
+>  **Tip**: Replace `COM10` or `/dev/ttyUSB0` with your actual serial port.
 > 
-> 💡 **Why flash both partitions?** The device uses A/B OTA with two app partitions (`ota_0` and `ota_1`). Flashing both ensures a known-good firmware in both slots. OTA updates alternate between partitions, so if one fails, the device rolls back to the other.
+>  **Why flash both partitions?** The device uses A/B OTA with two app partitions (`ota_0` and `ota_1`). Flashing both ensures a known-good firmware in both slots. OTA updates alternate between partitions, so if one fails, the device rolls back to the other.
 
 ---
 
@@ -172,7 +172,7 @@ python -m esptool -p COM10 -b 460800 --chip esp32 write_flash 0x10000 build/app-
 </details>
 
 <details>
-<summary><b>🐧 Linux / 🍎 macOS</b></summary>
+<summary><b> Linux /  macOS</b></summary>
 
 ```bash
 # Setup ESP-IDF environment
@@ -197,7 +197,7 @@ python -m esptool -p /dev/ttyUSB0 -b 460800 --chip esp32 write_flash 0x10000 bui
 
 ---
 
-## 🎛️ BLE GATT Services
+##  BLE GATT Services
 
 Control your audio device remotely via Bluetooth Low Energy:
 
@@ -235,7 +235,7 @@ CONFIG_BT_A2DP_AAC_DECODER=y
 
 ---
 
-## 🐛 Troubleshooting
+##  Troubleshooting
 
 <details>
 <summary><b>LDAC Low/Medium Quality causes buffer overflow</b></summary>
@@ -282,7 +282,7 @@ Then re-pair the device.
 
 ---
 
-## 🙏 Credits
+##  Credits
 
 This project builds upon the excellent work of the open-source community:
 
@@ -298,6 +298,6 @@ This project builds upon the excellent work of the open-source community:
 
 ---
 
-## 📄 License
+##  License
 
 This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
