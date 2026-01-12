@@ -212,7 +212,7 @@ Control your audio device remotely via Bluetooth Low Energy:
 
 ---
 
-## ⚙️ Configuration
+##  Configuration
 
 Key `sdkconfig` settings for optimal performance:
 
