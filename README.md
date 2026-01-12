@@ -67,7 +67,7 @@
 
 ---
 
-## 🔧 Hardware Requirements
+##  Hardware Requirements
 
 | Component | Requirement | Notes |
 |:----------|:------------|:------|
@@ -118,7 +118,7 @@ python -m esptool -p /dev/ttyUSB0 -b 460800 --chip esp32 write_flash 0x10000 app
 
 ---
 
-## 🛠️ Building from Source
+##  Building from Source
 
 If you want to customize the firmware or build your own, follow these steps:
 
@@ -148,7 +148,7 @@ git clone -b esp32 https://github.com/cfint/libldac-dec libldac-dec
 ### Step 3: Build & Flash
 
 <details>
-<summary><b>🪟 Windows</b></summary>
+<summary><b> Windows</b></summary>
 
 ```cmd
 :: Setup ESP-IDF environment
