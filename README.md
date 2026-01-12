@@ -16,14 +16,14 @@
 
 - [Features](#features)
 - [Supported Codecs](#supported-codecs)
-- [Hardware Requirements](#-hardware-requirements)
-- [Installation](#-installation)
-- [Building from Source](#️-building-from-source)
-- [BLE GATT Services](#-ble-gatt-services)
-- [Configuration](#-configuration)
-- [Troubleshooting](#-troubleshooting)
-- [Credits](#-credits)
-- [License](#-license)
+- [Hardware Requirements](#hardware-requirements)
+- [Installation](#installation)
+- [Building from Source](#️building-from-source)
+- [BLE GATT Services](#ble-gatt-services)
+- [Configuration](#configuration)
+- [Troubleshooting](#troubleshooting)
+- [Credits](#credits)
+- [License](#license)
 
 ---
 
