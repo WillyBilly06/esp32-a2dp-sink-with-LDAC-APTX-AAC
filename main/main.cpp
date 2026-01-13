@@ -23,6 +23,11 @@
 #include "ble/ble_gatt.h"
 #include "idf_update.h"
 
+// LED Matrix support
+#ifdef CONFIG_LED_MATRIX_ENABLE
+#include "led/led_controller.h"
+#endif
+
 static const char* TAG = "Main";
 
 // -----------------------------------------------------------
@@ -93,6 +98,15 @@ static void onBleName(const char* name, size_t len) {
     ESP_LOGI(TAG, "BLE name changed: %s", name);
 }
 
+#ifdef CONFIG_LED_MATRIX_ENABLE
+static void onBleLedEffect(uint8_t effectId) {
+    LedController::getInstance().setEffect(effectId);
+    g_settings.saveLedEffect(effectId);
+    g_ble.updateLedEffect(effectId);
+    ESP_LOGI(TAG, "LED effect: %s", LedController::getInstance().getCurrentEffectName());
+}
+#endif
+
 static volatile uint32_t g_otaReceived = 0;
 static volatile uint32_t g_otaTotalSize = 0;
 
@@ -112,6 +126,19 @@ static void onBleOtaCtrl(const uint8_t* data, size_t len) {
         uint32_t size = (uint32_t)atoi(sizeBuf);
         
         ESP_LOGI(TAG, "OTA BEGIN (ASCII): %u bytes", (unsigned)size);
+        
+        // Pause phone playback via AVRCP, disable audio, stop I2S
+        g_a2dp.pause();  // Send AVRCP pause to phone
+        vTaskDelay(pdMS_TO_TICKS(50));  // Brief delay for AVRCP command
+        g_a2dp.set_output_active(false);
+        g_i2s.stop();  // Stop I2S to free resources
+        
+        // Enable LED OTA progress display
+        #ifdef CONFIG_LED_MATRIX_ENABLE
+        LedController::getInstance().setOtaMode(true);
+        LedController::getInstance().setOtaProgress(0);
+        #endif
+        
         g_otaActive = true;
         g_otaReceived = 0;
         g_otaTotalSize = size;
@@ -119,6 +146,10 @@ static void onBleOtaCtrl(const uint8_t* data, size_t len) {
             ESP_LOGE(TAG, "OTA begin failed: %s", g_update.errorString());
             g_ble.notifyOtaCtrl("BEGIN_ERR");
             g_otaActive = false;
+            #ifdef CONFIG_LED_MATRIX_ENABLE
+            LedController::getInstance().setOtaMode(false);
+            #endif
+            g_i2s.start();
         } else {
             ESP_LOGI(TAG, "OTA begin OK, waiting for data...");
             g_ble.notifyOtaCtrl("BEGIN_OK");
@@ -155,6 +186,19 @@ static void onBleOtaCtrl(const uint8_t* data, size_t len) {
     if (cmd == 0x01 && len >= 5) { // BEGIN
         uint32_t size = data[1] | (data[2] << 8) | (data[3] << 16) | (data[4] << 24);
         ESP_LOGI(TAG, "OTA BEGIN (binary): %u bytes", (unsigned)size);
+        
+        // Pause phone playback via AVRCP, disable audio, stop I2S
+        g_a2dp.pause();  // Send AVRCP pause to phone
+        vTaskDelay(pdMS_TO_TICKS(50));  // Brief delay for AVRCP command
+        g_a2dp.set_output_active(false);
+        g_i2s.stop();  // Stop I2S to free resources
+        
+        // Enable LED OTA progress display
+        #ifdef CONFIG_LED_MATRIX_ENABLE
+        LedController::getInstance().setOtaMode(true);
+        LedController::getInstance().setOtaProgress(0);
+        #endif
+        
         g_otaActive = true;
         g_otaReceived = 0;
         g_otaTotalSize = size;
@@ -162,6 +206,10 @@ static void onBleOtaCtrl(const uint8_t* data, size_t len) {
             ESP_LOGE(TAG, "OTA begin failed: %s", g_update.errorString());
             g_ble.notifyOtaCtrl("BEGIN_ERR");
             g_otaActive = false;
+            #ifdef CONFIG_LED_MATRIX_ENABLE
+            LedController::getInstance().setOtaMode(false);
+            #endif
+            g_i2s.start();
         } else {
             ESP_LOGI(TAG, "OTA begin OK, waiting for data...");
             g_ble.notifyOtaCtrl("BEGIN_OK");
@@ -191,11 +239,22 @@ static void onBleOtaData(const uint8_t* data, size_t len) {
     if (!g_otaActive || len == 0) return;
     g_otaReceived += len;
     size_t written = g_update.write(data, len);
+    (void)written;  // Avoid unused variable warning
     
-    // Update progress on single line using carriage return
+    // Calculate and update progress
     uint8_t pct = (g_otaTotalSize > 0) ? (uint8_t)((uint64_t)g_otaReceived * 100 / g_otaTotalSize) : 0;
-    printf("\rOTA: %3u%% (%u / %u bytes)    ", pct, (unsigned)g_otaReceived, (unsigned)g_otaTotalSize);
-    fflush(stdout);
+    
+    // Update LED progress in real-time
+    #ifdef CONFIG_LED_MATRIX_ENABLE
+    LedController::getInstance().setOtaProgress(pct);
+    #endif
+    
+    // Log progress at each 5% milestone
+    static uint8_t lastPctLogged = 255;
+    if (pct != lastPctLogged && (pct % 5 == 0 || pct == 100)) {
+        ESP_LOGI(TAG, "OTA: %3u%% (%u / %u bytes)", pct, (unsigned)g_otaReceived, (unsigned)g_otaTotalSize);
+        lastPctLogged = pct;
+    }
 }
 
 // -----------------------------------------------------------
@@ -301,6 +360,26 @@ static void buttonsTask(void* arg) {
     uint32_t debounce1 = 0, pressStart1 = 0;
     bool lastBtn2 = true, btn2State = true;
     uint32_t debounce2 = 0;
+    
+    // LED effect button (can be separate or shared with button 2)
+    #ifdef CONFIG_LED_MATRIX_ENABLE
+    bool lastBtnLed = true, btnLedState = true;
+    uint32_t debounceLed = 0;
+    #ifdef CONFIG_LED_EFFECT_BUTTON_GPIO
+        const gpio_num_t ledBtnGpio = (gpio_num_t)CONFIG_LED_EFFECT_BUTTON_GPIO;
+        // Only init if different from existing buttons
+        if (ledBtnGpio != APP_BUTTON1_GPIO && ledBtnGpio != APP_BUTTON2_GPIO) {
+            gpio_config_t ledBtn = {};
+            ledBtn.intr_type = GPIO_INTR_DISABLE;
+            ledBtn.mode = GPIO_MODE_INPUT;
+            ledBtn.pin_bit_mask = (1ULL << ledBtnGpio);
+            ledBtn.pull_up_en = GPIO_PULLUP_ENABLE;
+            gpio_config(&ledBtn);
+        }
+    #else
+        const gpio_num_t ledBtnGpio = (gpio_num_t)19;  // Default
+    #endif
+    #endif
 
     while (true) {
         uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
@@ -340,6 +419,23 @@ static void buttonsTask(void* arg) {
         }
         lastBtn2 = r2;
 
+        // LED effect cycle button
+        #ifdef CONFIG_LED_MATRIX_ENABLE
+        bool rLed = gpio_get_level(ledBtnGpio);
+        if (rLed != lastBtnLed) debounceLed = now;
+        if ((now - debounceLed) > 25 && rLed != btnLedState) {
+            btnLedState = rLed;
+            if (rLed == 1) {  // Button released
+                LedController::getInstance().nextEffect();
+                uint8_t newEffect = LedController::getInstance().getCurrentEffectId();
+                g_settings.saveLedEffect(newEffect);
+                g_ble.updateLedEffect(newEffect);
+                ESP_LOGI(TAG, "LED effect: %s", LedController::getInstance().getCurrentEffectName());
+            }
+        }
+        lastBtnLed = rLed;
+        #endif
+
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -370,6 +466,11 @@ static void beatTask(void* arg) {
                     flashActive = true;
                     flashOffMs = now + APP_BEAT_FLASH_DURATION_MS;
                     lastBeatMs = now;
+                    
+                    // Signal beat to LED matrix
+                    #ifdef CONFIG_LED_MATRIX_ENABLE
+                    setLedBeat(true);
+                    #endif
                 }
             } else {
                 bassSmooth *= 0.9f;
@@ -379,6 +480,11 @@ static void beatTask(void* arg) {
             if (flashActive && now >= flashOffMs) {
                 gpio_set_level((gpio_num_t)APP_BEAT_LED_GPIO, 0);
                 flashActive = false;
+                
+                // Clear beat signal
+                #ifdef CONFIG_LED_MATRIX_ENABLE
+                setLedBeat(false);
+                #endif
             }
 
             // Update BLE levels every 50ms
@@ -398,15 +504,15 @@ static void beatTask(void* arg) {
                     smooth100_dB += 0.6f * (g_dsp.getPeakDB(2) - smooth100_dB);
                 }
 
-                // Convert dB to display position (0-80)
-                // Range: -60dB to 0dB maps to 0-80
+                // Convert dB to display position (0-100)
+                // Range: -60dB to 0dB maps to 0-100 (phone max is 120)
                 auto dbToPos = [](float dB) -> int {
                     // Clamp to range
                     if (dB < -60.0f) dB = -60.0f;
                     if (dB > 0.0f) dB = 0.0f;
-                    // Map -60..0 to 0..80
-                    int v = (int)roundf((dB + 60.0f) * (80.0f / 60.0f));
-                    return (v < 0) ? 0 : ((v > 80) ? 80 : v);
+                    // Map -60..0 to 0..100
+                    int v = (int)roundf((dB + 60.0f) * (100.0f / 60.0f));
+                    return (v < 0) ? 0 : ((v > 100) ? 100 : v);
                 };
 
                 if (g_ble.isConnected()) {
@@ -486,8 +592,14 @@ extern "C" void app_main(void) {
     gpio_set_level((gpio_num_t)APP_BEAT_LED_GPIO, 0);
 
     // Initialize BLE
+    #ifdef CONFIG_LED_MATRIX_ENABLE
+    g_ble.setCallbacks(onBleControl, onBleEq, onBleName, onBleOtaCtrl, onBleOtaData, onBleLedEffect);
+    uint8_t savedLedEffect = g_settings.loadLedEffect();
+    g_ble.init(deviceName.c_str(), APP_FW_VERSION, getControlByte(), eqBass, eqMid, eqTreble, savedLedEffect);
+    #else
     g_ble.setCallbacks(onBleControl, onBleEq, onBleName, onBleOtaCtrl, onBleOtaData);
     g_ble.init(deviceName.c_str(), APP_FW_VERSION, getControlByte(), eqBass, eqMid, eqTreble);
+    #endif
 
     // Start A2DP
     g_a2dp.set_output_active(false);
@@ -504,6 +616,12 @@ extern "C" void app_main(void) {
     xTaskCreatePinnedToCore(audioTxTask, "audio_tx", 8192, nullptr, configMAX_PRIORITIES - 2, nullptr, 1);
     xTaskCreate(buttonsTask, "buttons", 2048, nullptr, 5, nullptr);
     xTaskCreate(beatTask, "beat", 2048, nullptr, 4, nullptr);
+    
+    // Start LED matrix task (uses PSRAM for stack, so can be larger)
+    #ifdef CONFIG_LED_MATRIX_ENABLE
+    startLedTask(&g_dsp, 3, 8192);  // 8KB stack in PSRAM
+    ESP_LOGI(TAG, "LED matrix started on GPIO %d", CONFIG_LED_MATRIX_GPIO);
+    #endif
 
     ESP_LOGI(TAG, "System ready");
 }

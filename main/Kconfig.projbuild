@@ -79,9 +79,10 @@ menu "A2DP DSP BLE Configuration"
         config DSP_OUT_FRAMES
             int "DSP output buffer frames"
             default 1024
-            range 256 4096
+            range 256 8192
             help
                 Maximum frames per DSP processing block.
+                Larger values reduce overhead for high sample rate codecs like LDAC 96kHz.
     endmenu
 
     menu "Beat Detection"
@@ -163,6 +164,74 @@ menu "A2DP DSP BLE Configuration"
             range 1024 32768
             help
                 Size of each audio buffer in bytes.
+                Larger values help with high-bitrate LDAC.
+    endmenu
+
+    menu "LED Matrix Configuration"
+        config LED_MATRIX_ENABLE
+            bool "Enable WS2812B LED Matrix"
+            default y
+            help
+                Enable the 16x16 WS2812B LED matrix with audio-reactive effects.
+
+        config LED_MATRIX_GPIO
+            int "LED Matrix Data GPIO"
+            default 4
+            range 0 39
+            depends on LED_MATRIX_ENABLE
+            help
+                GPIO pin for WS2812B data line.
+
+        config LED_BRIGHTNESS
+            int "Default LED brightness (0-255)"
+            default 64
+            range 1 255
+            depends on LED_MATRIX_ENABLE
+            help
+                Default brightness level for the LED matrix.
+                Lower values reduce power consumption.
+
+        config LED_FPS
+            int "LED update rate (FPS)"
+            default 30
+            range 10 60
+            depends on LED_MATRIX_ENABLE
+            help
+                Frame rate for LED effect updates.
+                Higher values are smoother but use more CPU.
+
+        config LED_DEMO_TIMEOUT
+            int "Demo mode timeout (seconds)"
+            default 5
+            range 1 60
+            depends on LED_MATRIX_ENABLE
+            help
+                Time without audio before switching to demo mode.
+
+        config LED_EFFECT_BUTTON_GPIO
+            int "Effect cycle button GPIO"
+            default 19
+            range 0 39
+            depends on LED_MATRIX_ENABLE
+            help
+                GPIO pin for button to cycle through LED effects.
+                Set to same as Button1 or Button2 to share a button.
+
+        config LED_MATRIX_WIDTH
+            int "Matrix width (pixels)"
+            default 16
+            range 1 32
+            depends on LED_MATRIX_ENABLE
+            help
+                Width of the LED matrix.
+
+        config LED_MATRIX_HEIGHT
+            int "Matrix height (pixels)"
+            default 16
+            range 1 32
+            depends on LED_MATRIX_ENABLE
+            help
+                Height of the LED matrix.
     endmenu
 
 endmenu
