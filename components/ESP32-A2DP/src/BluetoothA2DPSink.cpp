@@ -523,12 +523,12 @@ void BluetoothA2DPSink::handle_audio_state(uint16_t event, void *p_param) {
     audio_state_callback(a2d->audio_stat.state, audio_state_obj);
   }
 
+  // Always keep I2S active - don't deactivate on suspend/stop
+  // This prevents audio gaps and keeps LED effects responsive
   if (ESP_A2D_AUDIO_STATE_STARTED == a2d->audio_stat.state) {
     set_i2s_active(true);
-  } else if (ESP_A2D_AUDIO_STATE_REMOTE_SUSPEND == a2d->audio_stat.state ||
-             ESP_A2D_AUDIO_STATE_STOPPED == a2d->audio_stat.state) {
-    set_i2s_active(false);
   }
+  // Removed: deactivation on REMOTE_SUSPEND and STOPPED states
 
   if (audio_state_callback_post != nullptr) {
     audio_state_callback_post(a2d->audio_stat.state, audio_state_obj_post);

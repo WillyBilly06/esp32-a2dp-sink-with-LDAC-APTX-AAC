@@ -1,0 +1,9 @@
+dependencies:
+  esp-idf-lib/color:
+    version: '*'
+  esp-idf-lib/esp_idf_lib_helpers:
+    version: '*'
+  esp-idf-lib/led_strip:
+    version: '*'
+description: led_effects
+version: 1.0.0

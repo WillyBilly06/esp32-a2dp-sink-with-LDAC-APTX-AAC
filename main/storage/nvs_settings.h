@@ -141,6 +141,26 @@ public:
         return saveDeviceName(std::string(name));
     }
 
+    // Load LED effect from NVS
+    uint8_t loadLedEffect() {
+        nvs_handle_t h;
+        if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return 0;
+        uint8_t effect = 0;
+        nvs_get_u8(h, "led_effect", &effect);
+        nvs_close(h);
+        return effect;
+    }
+
+    // Save LED effect to NVS
+    bool saveLedEffect(uint8_t effect) {
+        nvs_handle_t h;
+        if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return false;
+        nvs_set_u8(h, "led_effect", effect);
+        nvs_commit(h);
+        nvs_close(h);
+        return true;
+    }
+
 private:
     static constexpr const char* TAG = "NVS";
     Settings m_settings;
