@@ -308,7 +308,7 @@ This project builds upon the excellent work of the open-source community:
 | [arduino-fdk-aac](https://github.com/cfint/arduino-fdk-aac) | cfint | AAC decoder |
 | [libldac-dec](https://github.com/cfint/libldac-dec) | cfint | LDAC decoder |
 | [ESP32-A2DP](https://github.com/cfint/ESP32-A2DP/tree/v5.1-a2dp_codecs) | cfint/pschatzmann | A2DP library |
-| [arduino-audio-tools](https://github.com/cfint/arduino-audio-tools/tree/v5.1-a2dp_codecs) | cfint/pschatzmann | Audio processing |
+| [arduino-audio-tools](https://github.com/cfint/arduino-audio-tools/tree/v5.1-a2dp_codecs) | cfint/pschatzmann | A2DP/Audio Processing |
 
 ---
 
