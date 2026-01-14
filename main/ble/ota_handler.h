@@ -62,18 +62,25 @@ public:
             return false;
         }
         
-        // Pre-allocate buffer in SPIRAM
+        ESP_LOGI(TAG, "Allocating OTA buffer: %u bytes", (unsigned)OTA_BUFFER_SIZE);
+        
+        // Try PSRAM first, then internal RAM
         m_buffer = (uint8_t*)heap_caps_malloc(OTA_BUFFER_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!m_buffer) {
-            ESP_LOGW(TAG, "SPIRAM failed, using internal");
+        if (m_buffer) {
+            ESP_LOGI(TAG, "OTA buffer allocated in PSRAM");
+        } else {
+            ESP_LOGW(TAG, "PSRAM failed, trying internal RAM");
             m_buffer = (uint8_t*)heap_caps_malloc(OTA_BUFFER_SIZE, MALLOC_CAP_8BIT);
+            if (m_buffer) {
+                ESP_LOGI(TAG, "OTA buffer allocated in internal RAM");
+            }
         }
         if (!m_buffer) {
-            ESP_LOGE(TAG, "Failed to allocate OTA buffer");
+            ESP_LOGE(TAG, "Failed to allocate OTA buffer - try reducing CONFIG_OTA_BUFFER_SIZE");
             return false;
         }
         
-        ESP_LOGI(TAG, "OTA handler initialized");
+        ESP_LOGI(TAG, "OTA handler initialized (buffer=%u KB)", (unsigned)(OTA_BUFFER_SIZE / 1024));
         return true;
     }
 

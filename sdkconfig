@@ -657,9 +657,13 @@ CONFIG_FIRMWARE_VERSION="1.2.0"
 # Audio Buffer Configuration
 #
 # default:
+CONFIG_PSRAM_MODE=y
+# default:
 CONFIG_AUDIO_POOL_COUNT=48
 # default:
 CONFIG_AUDIO_POOL_BUF_SIZE=8192
+# default:
+CONFIG_OTA_BUFFER_SIZE=16384
 # end of Audio Buffer Configuration
 
 #

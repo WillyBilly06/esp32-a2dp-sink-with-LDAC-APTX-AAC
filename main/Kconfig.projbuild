@@ -151,20 +151,40 @@ menu "A2DP DSP BLE Configuration"
     endmenu
 
     menu "Audio Buffer Configuration"
+        config PSRAM_MODE
+            bool "Use PSRAM for audio buffers"
+            default y
+            help
+                Enable this if your ESP32 has PSRAM (WROVER modules).
+                Disable for ESP32 without PSRAM (WROOM modules).
+                When disabled, reduced buffer sizes are used to fit in internal RAM.
+
         config AUDIO_POOL_COUNT
             int "Audio buffer pool count"
-            default 48
+            default 48 if PSRAM_MODE
+            default 16 if !PSRAM_MODE
             range 8 128
             help
                 Number of audio buffers in the pool.
+                Reduced to 16 for non-PSRAM builds.
 
         config AUDIO_POOL_BUF_SIZE
             int "Audio buffer size (bytes)"
-            default 8192
+            default 8192 if PSRAM_MODE
+            default 2048 if !PSRAM_MODE
             range 1024 32768
             help
                 Size of each audio buffer in bytes.
-                Larger values help with high-bitrate LDAC.
+                Reduced to 2048 for non-PSRAM builds.
+
+        config OTA_BUFFER_SIZE
+            int "OTA pre-buffer size (bytes)"
+            default 16384 if PSRAM_MODE
+            default 4096 if !PSRAM_MODE
+            range 2048 65536
+            help
+                Size of OTA pre-begin buffer.
+                Reduced for non-PSRAM builds.
     endmenu
 
     menu "LED Matrix Configuration"
