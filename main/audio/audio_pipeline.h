@@ -79,9 +79,14 @@ public:
             return false;
         }
 
-        // Allocate DSP output buffer (prefer internal RAM for low latency)
+        // Allocate DSP output buffer in DMA-capable internal RAM for fast I2S writes
+        // This reduces latency as DMA can access internal RAM without cache contention
         size_t dspSize = sizeof(int32_t) * APP_DSP_OUT_FRAMES * 2;
-        m_dspOut = (int32_t*)heap_caps_malloc(dspSize, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        m_dspOut = (int32_t*)heap_caps_malloc(dspSize, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+        if (!m_dspOut) {
+            ESP_LOGW(TAG, "DMA-capable RAM dsp_out failed, trying internal 8BIT");
+            m_dspOut = (int32_t*)heap_caps_malloc(dspSize, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        }
         if (!m_dspOut) {
             ESP_LOGW(TAG, "Internal RAM dsp_out failed, trying any available memory");
             m_dspOut = (int32_t*)heap_caps_malloc(dspSize, MALLOC_CAP_8BIT);
@@ -144,7 +149,9 @@ public:
     void processBuffer(DSPProcessor &dsp, I2SOutput &i2s) {
         AudioBuf *buf = nullptr;
         
-        if (xQueueReceive(m_audioQueue, &buf, pdMS_TO_TICKS(10)) != pdTRUE || !buf) {
+        // Use longer timeout (20ms) to reduce underrun during codec transitions
+        // Short timeout causes unnecessary returns when BT decode is briefly delayed
+        if (xQueueReceive(m_audioQueue, &buf, pdMS_TO_TICKS(20)) != pdTRUE || !buf) {
             return;
         }
 
@@ -202,6 +209,18 @@ public:
     }
 
     uint32_t getLastProcessMs() const { return m_lastProcessMs; }
+    
+    // Diagnostic: get buffer statistics
+    uint32_t getDropCount() const { return m_dropCount; }
+    uint32_t getEnqueueFailCount() const { return m_enqueueFail; }
+    uint32_t getShortWriteCount() const { return m_shortWriteCount; }
+    
+    // Get queue fill level (0-100%)
+    uint8_t getQueueFillPercent() const {
+        if (!m_audioQueue) return 0;
+        UBaseType_t waiting = uxQueueMessagesWaiting(m_audioQueue);
+        return (uint8_t)((waiting * 100) / APP_AUDIO_POOL_COUNT);
+    }
 
 private:
     static constexpr const char* TAG = "AudioPipe";
@@ -215,24 +234,75 @@ private:
         constexpr float scale16 = 1.0f / 32768.0f;
         constexpr float scaleOut = 2147483647.0f;
         
-        for (uint32_t i = 0; i < frames; i++) {
-            int16_t l_raw = 0, r_raw = 0;
-            if (channels == 1) {
-                l_raw = smp[i];
-                r_raw = l_raw;
-            } else {
-                l_raw = smp[i * channels + 0];
-                r_raw = smp[i * channels + 1];
+        // Process in blocks of 4 samples to reduce loop overhead
+        uint32_t i = 0;
+        const uint32_t unrollEnd = frames & ~3u;  // Round down to multiple of 4
+        
+        if (channels == 1) {
+            // Mono path - unrolled
+            for (; i < unrollEnd; i += 4) {
+                float L0 = (float)smp[i] * scale16;
+                float L1 = (float)smp[i + 1] * scale16;
+                float L2 = (float)smp[i + 2] * scale16;
+                float L3 = (float)smp[i + 3] * scale16;
+                float R0 = L0, R1 = L1, R2 = L2, R3 = L3;
+                
+                dsp.processStereo(L0, R0);
+                dsp.processStereo(L1, R1);
+                dsp.processStereo(L2, R2);
+                dsp.processStereo(L3, R3);
+                
+                m_dspOut[2 * i + 0] = (int32_t)(L0 * scaleOut);
+                m_dspOut[2 * i + 1] = (int32_t)(R0 * scaleOut);
+                m_dspOut[2 * (i + 1) + 0] = (int32_t)(L1 * scaleOut);
+                m_dspOut[2 * (i + 1) + 1] = (int32_t)(R1 * scaleOut);
+                m_dspOut[2 * (i + 2) + 0] = (int32_t)(L2 * scaleOut);
+                m_dspOut[2 * (i + 2) + 1] = (int32_t)(R2 * scaleOut);
+                m_dspOut[2 * (i + 3) + 0] = (int32_t)(L3 * scaleOut);
+                m_dspOut[2 * (i + 3) + 1] = (int32_t)(R3 * scaleOut);
             }
-
-            float L = (float)l_raw * scale16;
-            float R = (float)r_raw * scale16;
-
-            dsp.processStereo(L, R);
-
-            // Convert to 32-bit output (soft clipper already limits to [-1, 1])
-            m_dspOut[2 * i + 0] = (int32_t)(L * scaleOut);
-            m_dspOut[2 * i + 1] = (int32_t)(R * scaleOut);
+            // Handle remaining samples
+            for (; i < frames; i++) {
+                float L = (float)smp[i] * scale16;
+                float R = L;
+                dsp.processStereo(L, R);
+                m_dspOut[2 * i + 0] = (int32_t)(L * scaleOut);
+                m_dspOut[2 * i + 1] = (int32_t)(R * scaleOut);
+            }
+        } else {
+            // Stereo path - unrolled
+            for (; i < unrollEnd; i += 4) {
+                float L0 = (float)smp[(i) * 2 + 0] * scale16;
+                float R0 = (float)smp[(i) * 2 + 1] * scale16;
+                float L1 = (float)smp[(i + 1) * 2 + 0] * scale16;
+                float R1 = (float)smp[(i + 1) * 2 + 1] * scale16;
+                float L2 = (float)smp[(i + 2) * 2 + 0] * scale16;
+                float R2 = (float)smp[(i + 2) * 2 + 1] * scale16;
+                float L3 = (float)smp[(i + 3) * 2 + 0] * scale16;
+                float R3 = (float)smp[(i + 3) * 2 + 1] * scale16;
+                
+                dsp.processStereo(L0, R0);
+                dsp.processStereo(L1, R1);
+                dsp.processStereo(L2, R2);
+                dsp.processStereo(L3, R3);
+                
+                m_dspOut[2 * i + 0] = (int32_t)(L0 * scaleOut);
+                m_dspOut[2 * i + 1] = (int32_t)(R0 * scaleOut);
+                m_dspOut[2 * (i + 1) + 0] = (int32_t)(L1 * scaleOut);
+                m_dspOut[2 * (i + 1) + 1] = (int32_t)(R1 * scaleOut);
+                m_dspOut[2 * (i + 2) + 0] = (int32_t)(L2 * scaleOut);
+                m_dspOut[2 * (i + 2) + 1] = (int32_t)(R2 * scaleOut);
+                m_dspOut[2 * (i + 3) + 0] = (int32_t)(L3 * scaleOut);
+                m_dspOut[2 * (i + 3) + 1] = (int32_t)(R3 * scaleOut);
+            }
+            // Handle remaining samples
+            for (; i < frames; i++) {
+                float L = (float)smp[i * channels + 0] * scale16;
+                float R = (float)smp[i * channels + 1] * scale16;
+                dsp.processStereo(L, R);
+                m_dspOut[2 * i + 0] = (int32_t)(L * scaleOut);
+                m_dspOut[2 * i + 1] = (int32_t)(R * scaleOut);
+            }
         }
     }
 
@@ -241,24 +311,75 @@ private:
         constexpr float scale32 = 1.0f / 2147483648.0f;
         constexpr float scaleOut = 2147483647.0f;
         
-        for (uint32_t i = 0; i < frames; i++) {
-            int32_t l_raw = 0, r_raw = 0;
-            if (channels == 1) {
-                l_raw = smp[i];
-                r_raw = l_raw;
-            } else {
-                l_raw = smp[i * channels + 0];
-                r_raw = smp[i * channels + 1];
+        // Process in blocks of 4 samples to reduce loop overhead
+        uint32_t i = 0;
+        const uint32_t unrollEnd = frames & ~3u;  // Round down to multiple of 4
+        
+        if (channels == 1) {
+            // Mono path - unrolled
+            for (; i < unrollEnd; i += 4) {
+                float L0 = (float)smp[i] * scale32;
+                float L1 = (float)smp[i + 1] * scale32;
+                float L2 = (float)smp[i + 2] * scale32;
+                float L3 = (float)smp[i + 3] * scale32;
+                float R0 = L0, R1 = L1, R2 = L2, R3 = L3;
+                
+                dsp.processStereo(L0, R0);
+                dsp.processStereo(L1, R1);
+                dsp.processStereo(L2, R2);
+                dsp.processStereo(L3, R3);
+                
+                m_dspOut[2 * i + 0] = (int32_t)(L0 * scaleOut);
+                m_dspOut[2 * i + 1] = (int32_t)(R0 * scaleOut);
+                m_dspOut[2 * (i + 1) + 0] = (int32_t)(L1 * scaleOut);
+                m_dspOut[2 * (i + 1) + 1] = (int32_t)(R1 * scaleOut);
+                m_dspOut[2 * (i + 2) + 0] = (int32_t)(L2 * scaleOut);
+                m_dspOut[2 * (i + 2) + 1] = (int32_t)(R2 * scaleOut);
+                m_dspOut[2 * (i + 3) + 0] = (int32_t)(L3 * scaleOut);
+                m_dspOut[2 * (i + 3) + 1] = (int32_t)(R3 * scaleOut);
             }
-
-            float L = (float)l_raw * scale32;
-            float R = (float)r_raw * scale32;
-
-            dsp.processStereo(L, R);
-
-            // Convert to 32-bit output (soft clipper already limits to [-1, 1])
-            m_dspOut[2 * i + 0] = (int32_t)(L * scaleOut);
-            m_dspOut[2 * i + 1] = (int32_t)(R * scaleOut);
+            // Handle remaining samples
+            for (; i < frames; i++) {
+                float L = (float)smp[i] * scale32;
+                float R = L;
+                dsp.processStereo(L, R);
+                m_dspOut[2 * i + 0] = (int32_t)(L * scaleOut);
+                m_dspOut[2 * i + 1] = (int32_t)(R * scaleOut);
+            }
+        } else {
+            // Stereo path - unrolled
+            for (; i < unrollEnd; i += 4) {
+                float L0 = (float)smp[(i) * 2 + 0] * scale32;
+                float R0 = (float)smp[(i) * 2 + 1] * scale32;
+                float L1 = (float)smp[(i + 1) * 2 + 0] * scale32;
+                float R1 = (float)smp[(i + 1) * 2 + 1] * scale32;
+                float L2 = (float)smp[(i + 2) * 2 + 0] * scale32;
+                float R2 = (float)smp[(i + 2) * 2 + 1] * scale32;
+                float L3 = (float)smp[(i + 3) * 2 + 0] * scale32;
+                float R3 = (float)smp[(i + 3) * 2 + 1] * scale32;
+                
+                dsp.processStereo(L0, R0);
+                dsp.processStereo(L1, R1);
+                dsp.processStereo(L2, R2);
+                dsp.processStereo(L3, R3);
+                
+                m_dspOut[2 * i + 0] = (int32_t)(L0 * scaleOut);
+                m_dspOut[2 * i + 1] = (int32_t)(R0 * scaleOut);
+                m_dspOut[2 * (i + 1) + 0] = (int32_t)(L1 * scaleOut);
+                m_dspOut[2 * (i + 1) + 1] = (int32_t)(R1 * scaleOut);
+                m_dspOut[2 * (i + 2) + 0] = (int32_t)(L2 * scaleOut);
+                m_dspOut[2 * (i + 2) + 1] = (int32_t)(R2 * scaleOut);
+                m_dspOut[2 * (i + 3) + 0] = (int32_t)(L3 * scaleOut);
+                m_dspOut[2 * (i + 3) + 1] = (int32_t)(R3 * scaleOut);
+            }
+            // Handle remaining samples
+            for (; i < frames; i++) {
+                float L = (float)smp[i * channels + 0] * scale32;
+                float R = (float)smp[i * channels + 1] * scale32;
+                dsp.processStereo(L, R);
+                m_dspOut[2 * i + 0] = (int32_t)(L * scaleOut);
+                m_dspOut[2 * i + 1] = (int32_t)(R * scaleOut);
+            }
         }
     }
 
