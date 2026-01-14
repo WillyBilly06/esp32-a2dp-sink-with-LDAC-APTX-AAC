@@ -67,16 +67,30 @@
 
 ---
 
-##  Hardware Requirements
+## 🔧 Hardware Requirements
 
 | Component | Requirement | Notes |
 |:----------|:------------|:------|
-| **MCU** | ESP32-WROVER | Original ESP32 only (not S2/S3/C3) |
-| **PSRAM** | 8MB | Required for AAC decoder |
+| **MCU** | ESP32-WROVER or ESP32-WROOM | Original ESP32 only (not S2/S3/C3) |
+| **PSRAM** | Optional (8MB recommended) | Enables larger buffers for LDAC/AAC |
 | **Flash** | 8MB | Enables OTA dual partition |
 | **DAC** | I2S compatible | PCM5102, MAX98357A, etc. |
 
->  **Important**: Bluetooth Classic A2DP is only supported on the original ESP32 chip.
+### PSRAM vs Non-PSRAM Mode
+
+The firmware supports both ESP32-WROVER (with PSRAM) and ESP32-WROOM (without PSRAM):
+
+| Mode | Audio Buffers | OTA Buffer | LED Stack | Best For |
+|:-----|:-------------|:-----------|:----------|:---------|
+| **With PSRAM** | 48 × 8KB (384KB) | 16KB | 8KB | LDAC 96kHz, AAC |
+| **Without PSRAM** | 16 × 2KB (32KB) | 4KB | 4KB | SBC, aptX |
+
+To switch modes, run `idf.py menuconfig` and navigate to:
+`ESP32 Bluetooth Speaker → Audio Buffer Configuration → Use PSRAM for audio buffers`
+
+> ⚠️ **Note**: Without PSRAM, LDAC 96kHz and AAC may experience buffer underruns. SBC and aptX work reliably.
+
+> ⚠️ **Important**: Bluetooth Classic A2DP is only supported on the original ESP32 chip.
 
 ---
 

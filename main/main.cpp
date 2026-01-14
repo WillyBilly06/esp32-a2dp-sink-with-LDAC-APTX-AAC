@@ -612,14 +612,24 @@ extern "C" void app_main(void) {
     g_a2dp.start(deviceName.c_str());
     ESP_LOGI(TAG, "A2DP started as '%s'", deviceName.c_str());
 
+    // Log memory status before starting tasks
+    ESP_LOGI(TAG, "Free heap: internal=%u KB, PSRAM=%u KB",
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024),
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
+
     // Start tasks - audio_tx at very high priority for smooth LDAC playback
     xTaskCreatePinnedToCore(audioTxTask, "audio_tx", 8192, nullptr, configMAX_PRIORITIES - 2, nullptr, 1);
     xTaskCreate(buttonsTask, "buttons", 2048, nullptr, 5, nullptr);
     xTaskCreate(beatTask, "beat", 2048, nullptr, 4, nullptr);
     
-    // Start LED matrix task (uses PSRAM for stack, so can be larger)
+    // Start LED matrix task
+    // Stack size: 8KB with PSRAM, 4KB without (RMT driver needs internal RAM stack)
     #ifdef CONFIG_LED_MATRIX_ENABLE
-    startLedTask(&g_dsp, 3, 8192);  // 8KB stack in PSRAM
+    #if APP_HAS_PSRAM
+    startLedTask(&g_dsp, 3, 8192);  // 8KB stack - PSRAM available
+    #else
+    startLedTask(&g_dsp, 3, 4096);  // 4KB stack - no PSRAM, conserve memory
+    #endif
     ESP_LOGI(TAG, "LED matrix started on GPIO %d", CONFIG_LED_MATRIX_GPIO);
     #endif
 

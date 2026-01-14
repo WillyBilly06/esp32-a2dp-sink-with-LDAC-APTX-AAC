@@ -70,7 +70,14 @@
 
 // OTA Constants
 #define APP_OTA_ACK_INTERVAL        4096
-#define APP_OTA_PRE_BEGIN_BUFFER    16384
+#define APP_OTA_PRE_BEGIN_BUFFER    CONFIG_OTA_BUFFER_SIZE
+
+// PSRAM mode flag
+#ifdef CONFIG_PSRAM_MODE
+#define APP_HAS_PSRAM               1
+#else
+#define APP_HAS_PSRAM               0
+#endif
 
 // Firmware version alias
 #define APP_FW_VERSION              APP_FIRMWARE_VERSION

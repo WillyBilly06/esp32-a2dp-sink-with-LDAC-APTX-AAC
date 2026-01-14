@@ -53,26 +53,38 @@ public:
             return false;
         }
 
-        // Allocate pool in SPIRAM
-        m_pool = (AudioBuf*)heap_caps_malloc(sizeof(AudioBuf) * APP_AUDIO_POOL_COUNT, 
-                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!m_pool) {
-            ESP_LOGW(TAG, "SPIRAM alloc failed, trying internal heap");
-            m_pool = (AudioBuf*)heap_caps_malloc(sizeof(AudioBuf) * APP_AUDIO_POOL_COUNT, 
-                                                  MALLOC_CAP_8BIT);
+        // Calculate required memory
+        size_t poolSize = sizeof(AudioBuf) * APP_AUDIO_POOL_COUNT;
+        ESP_LOGI(TAG, "Allocating audio pool: %d buffers x %d bytes = %u KB total",
+                 APP_AUDIO_POOL_COUNT, (int)sizeof(AudioBuf), (unsigned)(poolSize / 1024));
+        
+        // Log available memory
+        ESP_LOGI(TAG, "Free heap: internal=%u KB, PSRAM=%u KB",
+                 (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024),
+                 (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
+
+        // Try PSRAM first (if available), then fall back to internal
+        m_pool = (AudioBuf*)heap_caps_malloc(poolSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (m_pool) {
+            ESP_LOGI(TAG, "Audio pool allocated in PSRAM");
+        } else {
+            ESP_LOGW(TAG, "PSRAM alloc failed, trying internal heap");
+            m_pool = (AudioBuf*)heap_caps_malloc(poolSize, MALLOC_CAP_8BIT);
+            if (m_pool) {
+                ESP_LOGI(TAG, "Audio pool allocated in internal RAM");
+            }
         }
         if (!m_pool) {
-            ESP_LOGE(TAG, "Failed to allocate audio pool");
+            ESP_LOGE(TAG, "Failed to allocate audio pool - try reducing CONFIG_AUDIO_POOL_COUNT or CONFIG_AUDIO_POOL_BUF_SIZE");
             return false;
         }
 
         // Allocate DSP output buffer (prefer internal RAM for low latency)
-        m_dspOut = (int32_t*)heap_caps_malloc(sizeof(int32_t) * APP_DSP_OUT_FRAMES * 2, 
-                                               MALLOC_CAP_INTERNAL);
+        size_t dspSize = sizeof(int32_t) * APP_DSP_OUT_FRAMES * 2;
+        m_dspOut = (int32_t*)heap_caps_malloc(dspSize, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         if (!m_dspOut) {
-            ESP_LOGW(TAG, "Internal RAM dsp_out failed, using SPIRAM");
-            m_dspOut = (int32_t*)heap_caps_malloc(sizeof(int32_t) * APP_DSP_OUT_FRAMES * 2, 
-                                                   MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
+            ESP_LOGW(TAG, "Internal RAM dsp_out failed, trying any available memory");
+            m_dspOut = (int32_t*)heap_caps_malloc(dspSize, MALLOC_CAP_8BIT);
         }
         if (!m_dspOut) {
             ESP_LOGE(TAG, "Failed to allocate DSP output buffer");
@@ -89,8 +101,8 @@ public:
             xQueueSend(m_freeQueue, &p, 0);
         }
 
-        ESP_LOGI(TAG, "Audio pipeline initialized: %d buffers @ %d bytes", 
-                 APP_AUDIO_POOL_COUNT, APP_AUDIO_POOL_BUF_SIZE);
+        ESP_LOGI(TAG, "Audio pipeline initialized: %d buffers @ %d bytes (total %u KB)", 
+                 APP_AUDIO_POOL_COUNT, APP_AUDIO_POOL_BUF_SIZE, (unsigned)(poolSize / 1024));
         return true;
     }
 
