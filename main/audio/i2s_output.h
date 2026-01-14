@@ -46,8 +46,10 @@ public:
         i2s_config.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
         i2s_config.communication_format = (i2s_comm_format_t)(I2S_COMM_FORMAT_I2S_MSB);
         i2s_config.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
-        i2s_config.dma_buf_count = 12;
-        i2s_config.dma_buf_len = 512;
+        // Increased DMA buffering: 16 buffers x 1024 samples = 16384 samples (~371ms at 44.1kHz)
+        // This provides more headroom for brief decode stalls and reduces underrun probability
+        i2s_config.dma_buf_count = 16;
+        i2s_config.dma_buf_len = 1024;
         i2s_config.use_apll = false;
         i2s_config.tx_desc_auto_clear = true;
         i2s_config.fixed_mclk = 0;
@@ -63,8 +65,14 @@ public:
             return e;
         };
 
-        esp_err_t err = install_with(12, 512);
+        // Try progressively smaller configurations if memory constrained
+        esp_err_t err = install_with(16, 1024);
         if (err == ESP_ERR_NO_MEM) {
+            ESP_LOGW(TAG, "Trying reduced DMA config (12x512)");
+            err = install_with(12, 512);
+        }
+        if (err == ESP_ERR_NO_MEM) {
+            ESP_LOGW(TAG, "Trying minimal DMA config (8x256)");
             err = install_with(8, 256);
         }
         if (err != ESP_OK) {
