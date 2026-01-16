@@ -36,6 +36,8 @@ public:
     using OtaDataCallback = void(*)(const uint8_t* data, size_t len);
     // LED effect callback - receives effect ID when written
     using LedEffectCallback = void(*)(uint8_t effectId);
+    // LED settings callback - receives full LED settings packet (brightness, colors, gradient, speed, effectId)
+    using LedSettingsCallback = void(*)(const uint8_t* data, size_t len);
 
     BleGattService()
         : m_gattsIf(0)
@@ -54,6 +56,7 @@ public:
         , m_ledEffectCharHandle(0)
         , m_otaCtrlCharHandle(0)
         , m_otaDataCharHandle(0)
+        , m_ledSettingsCharHandle(0)
         // Callbacks
         , m_controlCb(nullptr)
         , m_eqCb(nullptr)
@@ -61,6 +64,7 @@ public:
         , m_otaCtrlCb(nullptr)
         , m_otaDataCb(nullptr)
         , m_ledEffectCb(nullptr)
+        , m_ledSettingsCb(nullptr)
     {
         memset(m_uuidLevelsService, 0, 16);
         memset(m_uuidLevelsChar, 0, 16);
@@ -72,6 +76,7 @@ public:
         memset(m_uuidLedEffectChar, 0, 16);
         memset(m_uuidOtaCtrlChar, 0, 16);
         memset(m_uuidOtaDataChar, 0, 16);
+        memset(m_uuidLedSettingsChar, 0, 16);
         
         // Initialize characteristic values
         memset(m_controlValue, 0, sizeof(m_controlValue));
@@ -80,22 +85,31 @@ public:
         memset(m_fwValue, 0, sizeof(m_fwValue));
         memset(m_levelsValue, 0, sizeof(m_levelsValue));
         m_ledEffectValue[0] = 0;
+        // Default LED settings: [brightness=128, r1=255, g1=0, b1=128, r2=0, g2=128, b2=255, gradient=0, speed=50, effectId=0]
+        memset(m_ledSettingsValue, 0, sizeof(m_ledSettingsValue));
+        m_ledSettingsValue[0] = 128;  // brightness
+        m_ledSettingsValue[1] = 255;  // r1
+        m_ledSettingsValue[4] = 128;  // r2
+        m_ledSettingsValue[6] = 255;  // b2
+        m_ledSettingsValue[8] = 50;   // speed
     }
 
     void setCallbacks(ControlCallback ctrlCb, EqCallback eqCb, NameCallback nameCb,
                       OtaCtrlCallback otaCtrlCb, OtaDataCallback otaDataCb,
-                      LedEffectCallback ledEffectCb = nullptr) {
+                      LedEffectCallback ledEffectCb = nullptr,
+                      LedSettingsCallback ledSettingsCb = nullptr) {
         m_controlCb = ctrlCb;
         m_eqCb = eqCb;
         m_nameCb = nameCb;
         m_otaCtrlCb = otaCtrlCb;
         m_otaDataCb = otaDataCb;
         m_ledEffectCb = ledEffectCb;
+        m_ledSettingsCb = ledSettingsCb;
     }
 
     bool init(const char* deviceName, const char* fwVersion,
               uint8_t controlByte, int8_t bassDb, int8_t midDb, int8_t trebleDb,
-              uint8_t ledEffect = 0) {
+              uint8_t ledEffect = 0, uint8_t brightness = 128) {
         
         s_bleInstance = this;
         
@@ -107,6 +121,7 @@ public:
         m_eqValue[1] = (uint8_t)midDb;
         m_eqValue[2] = (uint8_t)trebleDb;
         m_ledEffectValue[0] = ledEffect;
+        m_ledSettingsValue[0] = brightness;  // Store brightness in LED settings
 
         // Parse UUIDs
         uuid128FromString(APP_BLE_SERVICE_UUID_LEVELS, m_uuidLevelsService);
@@ -119,6 +134,7 @@ public:
         uuid128FromString(APP_BLE_CHAR_UUID_LED_EFFECT, m_uuidLedEffectChar);
         uuid128FromString(APP_BLE_CHAR_UUID_OTA_CTRL, m_uuidOtaCtrlChar);
         uuid128FromString(APP_BLE_CHAR_UUID_OTA_DATA, m_uuidOtaDataChar);
+        uuid128FromString(APP_BLE_CHAR_UUID_LED_SETTINGS, m_uuidLedSettingsChar);
 
         // Init Bluetooth controller
         esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
@@ -225,6 +241,45 @@ public:
     }
 
     uint8_t getLedEffectValue() const { return m_ledEffectValue[0]; }
+
+    // Update LED settings - expects 10-byte packet: [brightness, r1, g1, b1, r2, g2, b2, gradient, speed, effectId]
+    void updateLedSettings(const uint8_t* data, size_t len) {
+        if (len > sizeof(m_ledSettingsValue)) len = sizeof(m_ledSettingsValue);
+        memcpy(m_ledSettingsValue, data, len);
+        if (m_connected && m_ledSettingsCharHandle && m_gattsIf) {
+            esp_err_t ret = esp_ble_gatts_send_indicate(m_gattsIf, m_connId, m_ledSettingsCharHandle,
+                                        10, m_ledSettingsValue, false);
+            if (ret != ESP_OK) {
+                ESP_LOGD(TAG, "LED settings notify failed: %d", ret);
+            }
+        }
+    }
+
+    // Update just brightness (first byte of LED settings)
+    void updateBrightness(uint8_t brightness) {
+        m_ledSettingsValue[0] = brightness;
+        if (m_connected && m_ledSettingsCharHandle && m_gattsIf) {
+            esp_err_t ret = esp_ble_gatts_send_indicate(m_gattsIf, m_connId, m_ledSettingsCharHandle,
+                                        10, m_ledSettingsValue, false);
+            if (ret != ESP_OK) {
+                ESP_LOGD(TAG, "LED settings notify failed: %d", ret);
+            }
+        }
+    }
+
+    uint8_t getBrightnessValue() const { return m_ledSettingsValue[0]; }
+    const uint8_t* getLedSettingsValue() const { return m_ledSettingsValue; }
+    
+    // Notify LED settings to connected client
+    void notifyLedSettings() {
+        if (m_connected && m_ledSettingsCharHandle && m_gattsIf) {
+            esp_err_t ret = esp_ble_gatts_send_indicate(m_gattsIf, m_connId, m_ledSettingsCharHandle,
+                                        10, m_ledSettingsValue, false);
+            if (ret != ESP_OK) {
+                ESP_LOGD(TAG, "LED settings notify failed: %d", ret);
+            }
+        }
+    }
 
     // Get control byte value
     uint8_t getControlValue() const { return m_controlValue[0]; }
@@ -381,8 +436,8 @@ private:
         svc.id.inst_id = 0x01;
         svc.id.uuid.len = ESP_UUID_LEN_128;
         memcpy(svc.id.uuid.uuid.uuid128, m_uuidControlService, 16);
-        // 7 characteristics with CCCD each = 7*3 = 21 handles + 1 service handle = 22
-        esp_ble_gatts_create_service(gatts_if, &svc, 24);
+        // 8 characteristics with CCCD each = 8*3 = 24 handles + 1 service handle = 25
+        esp_ble_gatts_create_service(gatts_if, &svc, 27);
     }
 
     void handleCreateEvent(esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t* param) {
@@ -422,6 +477,9 @@ private:
             addCharacteristic(m_controlServiceHandle, m_uuidOtaDataChar,
                              ESP_GATT_PERM_WRITE,
                              ESP_GATT_CHAR_PROP_BIT_WRITE | ESP_GATT_CHAR_PROP_BIT_WRITE_NR);
+            addCharacteristic(m_controlServiceHandle, m_uuidLedSettingsChar,
+                             ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+                             ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_WRITE | ESP_GATT_CHAR_PROP_BIT_NOTIFY);
         }
     }
 
@@ -456,6 +514,9 @@ private:
             m_otaCtrlCharHandle = handle;;
         } else if (uuidEqual128(param->add_char.char_uuid, m_uuidOtaDataChar)) {
             m_otaDataCharHandle = handle;
+        } else if (uuidEqual128(param->add_char.char_uuid, m_uuidLedSettingsChar)) {
+            m_ledSettingsCharHandle = handle;
+            ESP_LOGI(TAG, "LED Settings char handle assigned: %d", handle);
         }
 
         // Add CCCD for characteristics that support notify
@@ -509,6 +570,11 @@ private:
             vTaskDelay(pdMS_TO_TICKS(100));
             
             if (!self->m_connected) { vTaskDelete(NULL); return; }
+            // Send LED settings (10 bytes)
+            self->notifyLedSettings();
+            vTaskDelay(pdMS_TO_TICKS(100));
+            
+            if (!self->m_connected) { vTaskDelete(NULL); return; }
             // Retry control notification
             self->updateControl(self->m_controlValue[0]);
             
@@ -553,6 +619,12 @@ private:
             rsp.attr_value.len = 1;
             rsp.attr_value.value[0] = m_ledEffectValue[0];
             ESP_LOGI(TAG, "LED Effect READ: value=%d", m_ledEffectValue[0]);
+        } else if (param->read.handle == m_ledSettingsCharHandle) {
+            // Return full 10-byte LED settings
+            rsp.attr_value.len = 10;
+            memcpy(rsp.attr_value.value, m_ledSettingsValue, 10);
+            ESP_LOGI(TAG, "LED Settings READ: brightness=%d, gradient=%d, speed=%d", 
+                     m_ledSettingsValue[0], m_ledSettingsValue[7], m_ledSettingsValue[8]);
         }
 
         esp_ble_gatts_send_response(gatts_if, param->read.conn_id,
@@ -579,6 +651,12 @@ private:
             m_ledEffectValue[0] = data[0];
             ESP_LOGI(TAG, "LED Effect WRITE: value=%d", data[0]);
             if (m_ledEffectCb) m_ledEffectCb(data[0]);
+        } else if (handle == m_ledSettingsCharHandle && len >= 10) {
+            // Store full 10-byte LED settings
+            memcpy(m_ledSettingsValue, data, 10);
+            ESP_LOGI(TAG, "LED Settings WRITE: brightness=%d, gradient=%d, speed=%d", 
+                     data[0], data[7], data[8]);
+            if (m_ledSettingsCb) m_ledSettingsCb(data, len);
         } else if (handle == m_otaCtrlCharHandle && len >= 1) {
             ESP_LOGI(TAG, "OTA CTRL write: len=%u, first=%02X", len, data[0]);
             if (m_otaCtrlCb) m_otaCtrlCb(data, len);
@@ -622,6 +700,7 @@ private:
     uint16_t m_ledEffectCharHandle;
     uint16_t m_otaCtrlCharHandle;
     uint16_t m_otaDataCharHandle;
+    uint16_t m_ledSettingsCharHandle;
 
     // UUIDs (little-endian)
     uint8_t m_uuidLevelsService[16];
@@ -634,11 +713,13 @@ private:
     uint8_t m_uuidLedEffectChar[16];
     uint8_t m_uuidOtaCtrlChar[16];
     uint8_t m_uuidOtaDataChar[16];
+    uint8_t m_uuidLedSettingsChar[16];
 
     // Characteristic values
     uint8_t m_controlValue[1];
     uint8_t m_eqValue[3];
     uint8_t m_ledEffectValue[1];
+    uint8_t m_ledSettingsValue[10];  // [brightness, r1, g1, b1, r2, g2, b2, gradient, speed, effectId]
     char m_nameValue[64];
     char m_fwValue[32];
     char m_levelsValue[32];
@@ -650,4 +731,5 @@ private:
     OtaCtrlCallback m_otaCtrlCb;
     OtaDataCallback m_otaDataCb;
     LedEffectCallback m_ledEffectCb;
+    LedSettingsCallback m_ledSettingsCb;
 };

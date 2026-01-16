@@ -105,6 +105,20 @@ static void onBleLedEffect(uint8_t effectId) {
     g_ble.updateLedEffect(effectId);
     ESP_LOGI(TAG, "LED effect: %s", LedController::getInstance().getCurrentEffectName());
 }
+
+// LED settings callback - handles full 10-byte packet: [brightness, r1, g1, b1, r2, g2, b2, gradient, speed, effectId]
+static void onBleLedSettings(const uint8_t* data, size_t len) {
+    if (len < 10) return;
+    
+    // Pass to LED controller (handles brightness + ambient effect settings)
+    LedController::getInstance().setLedSettings(data, len);
+    
+    // Notify back to app
+    g_ble.updateLedSettings(data, len);
+    
+    ESP_LOGI(TAG, "LED settings: brightness=%d, gradient=%d, speed=%d", 
+             data[0], data[7], data[8]);
+}
 #endif
 
 static volatile uint32_t g_otaReceived = 0;
@@ -593,9 +607,10 @@ extern "C" void app_main(void) {
 
     // Initialize BLE
     #ifdef CONFIG_LED_MATRIX_ENABLE
-    g_ble.setCallbacks(onBleControl, onBleEq, onBleName, onBleOtaCtrl, onBleOtaData, onBleLedEffect);
+    g_ble.setCallbacks(onBleControl, onBleEq, onBleName, onBleOtaCtrl, onBleOtaData, onBleLedEffect, onBleLedSettings);
     uint8_t savedLedEffect = g_settings.loadLedEffect();
-    g_ble.init(deviceName.c_str(), APP_FW_VERSION, getControlByte(), eqBass, eqMid, eqTreble, savedLedEffect);
+    uint8_t savedBrightness = LedController::getInstance().getBrightness();
+    g_ble.init(deviceName.c_str(), APP_FW_VERSION, getControlByte(), eqBass, eqMid, eqTreble, savedLedEffect, savedBrightness);
     #else
     g_ble.setCallbacks(onBleControl, onBleEq, onBleName, onBleOtaCtrl, onBleOtaData);
     g_ble.init(deviceName.c_str(), APP_FW_VERSION, getControlByte(), eqBass, eqMid, eqTreble);
@@ -609,6 +624,14 @@ extern "C" void app_main(void) {
     g_a2dp.set_task_core(0);
     g_a2dp.set_on_connection_state_changed(onConnectionState);
     g_a2dp.set_on_audio_state_changed(onAudioState);
+    
+    // Volume change callback for LED effect
+    #ifdef CONFIG_LED_MATRIX_ENABLE
+    g_a2dp.set_avrc_rn_volumechange([](int volume) {
+        LedController::getInstance().setVolume((uint8_t)volume);
+    });
+    #endif
+    
     g_a2dp.start(deviceName.c_str());
     ESP_LOGI(TAG, "A2DP started as '%s'", deviceName.c_str());
 
