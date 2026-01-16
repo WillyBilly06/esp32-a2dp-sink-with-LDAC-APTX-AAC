@@ -208,6 +208,14 @@ public:
         m_volumeOverlayStart = xTaskGetTickCount();
         m_volumeDisplayTarget = volume;
         
+        // If brightness is 0 (or very low), temporarily boost it so volume overlay is visible
+        // This doesn't notify BLE, just affects local driver output
+        if (m_brightness < 10 && !m_volumeBrightnessOverride) {
+            m_volumeBrightnessOverride = true;
+            m_brightnessBeforeVolume = m_brightness;
+            m_driver.setBrightness(10);
+        }
+        
         // Update volume effect if active
         if (m_currentEffect == LED_EFFECT_VOLUME) {
             VolumeEffect* volEffect = static_cast<VolumeEffect*>(m_effects[LED_EFFECT_VOLUME]);
@@ -254,6 +262,11 @@ public:
         float fade = getVolumeOverlayFade();
         if (fade <= 0.0f) {
             m_volumeOverlayActive = false;
+            // Restore original brightness if we temporarily boosted it
+            if (m_volumeBrightnessOverride) {
+                m_volumeBrightnessOverride = false;
+                m_driver.setBrightness(m_brightnessBeforeVolume);
+            }
             return;
         }
         
@@ -274,6 +287,12 @@ public:
         volFrame++;
         float pulse = 0.85f + 0.15f * sinf(volFrame * 0.15f);
         
+        // Use brightness setting but with minimum floor of 10 (so volume is always visible)
+        uint8_t effectiveBrightness = (m_brightness < 10) ? 10 : m_brightness;
+        // Don't scale colors by brightness - let the driver handle it via setBrightness()
+        // This prevents double-dimming when brightness is very low
+        float brightnessScale = 1.0f;
+        
         // Draw volume bar from bottom to top
         for (int row = 0; row < LED_MATRIX_HEIGHT; row++) {
             int displayRow = LED_MATRIX_HEIGHT - 1 - row;  // Bottom to top
@@ -288,8 +307,8 @@ public:
                 g = (uint8_t)(255 * (1.0f - rowPct));
                 b = (uint8_t)(255 * (1.0f - rowPct));
                 
-                // Apply pulse and fade
-                float intensity = pulse * fade;
+                // Apply pulse, fade and brightness (with minimum floor)
+                float intensity = pulse * fade * brightnessScale;
                 r = (uint8_t)(r * intensity);
                 g = (uint8_t)(g * intensity);
                 b = (uint8_t)(b * intensity);
@@ -310,7 +329,12 @@ public:
             }
         }
         
+        // Temporarily set driver brightness to effective value (in case global brightness is 0)
+        // This doesn't notify BLE, just affects the driver output
+        m_driver.setBrightness(effectiveBrightness);
         m_driver.show();
+        // Restore original brightness for next regular effect render
+        m_driver.setBrightness(m_brightness);
     }
     
     // Draw volume number on the display
@@ -661,6 +685,10 @@ private:
     TickType_t m_volumeOverlayStart = 0;
     uint8_t m_volumeDisplayTarget = 64;
     float m_volumeDisplaySmooth = 0.5f;
+    
+    // Temporary brightness override for volume overlay when user brightness is 0
+    bool m_volumeBrightnessOverride = false;
+    uint8_t m_brightnessBeforeVolume = 0;
 };
 
 // -----------------------------------------------------------
