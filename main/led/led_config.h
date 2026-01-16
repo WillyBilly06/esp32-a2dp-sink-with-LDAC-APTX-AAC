@@ -82,7 +82,19 @@ enum LedEffectId {
     LED_EFFECT_AUDIO_SCOPE,          // Oscilloscope-style waveform
     LED_EFFECT_BOUNCING_BALLS,       // Balls bounce to the beat
     LED_EFFECT_LAVA_LAMP,            // Blob-like lava lamp effect
+    LED_EFFECT_AMBIENT,              // Ambient mode with configurable colors, gradient, speed
+    LED_EFFECT_VOLUME,               // Volume level visualizer
     LED_EFFECT_COUNT                 // Total number of effects
+};
+
+// Gradient types for Ambient effect
+enum LedGradientType {
+    GRADIENT_NONE = 0,       // Solid color (use color1)
+    GRADIENT_LINEAR_H,       // Horizontal linear gradient
+    GRADIENT_LINEAR_V,       // Vertical linear gradient
+    GRADIENT_RADIAL,         // Radial gradient from center
+    GRADIENT_DIAGONAL,       // Diagonal gradient
+    GRADIENT_COUNT
 };
 
 // Demo mode sub-effects (cycle through when no audio)

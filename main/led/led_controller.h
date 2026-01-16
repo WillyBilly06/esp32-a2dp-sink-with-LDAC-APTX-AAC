@@ -40,6 +40,9 @@ public:
         // Create all effects
         createEffects();
         
+        // Play startup animation
+        playStartupAnimation();
+        
         // Load saved effect from NVS
         loadSettings();
         
@@ -142,11 +145,234 @@ public:
         return effect ? effect->getName() : "Unknown";
     }
     
-    void setBrightness(uint8_t brightness) {
+    void setBrightness(uint8_t brightness, bool save = false) {
         m_brightness = brightness;
+        // Also update Ambient effect if active
+        if (m_currentEffect == LED_EFFECT_AMBIENT) {
+            AmbientEffect* ambient = static_cast<AmbientEffect*>(m_effects[LED_EFFECT_AMBIENT]);
+            if (ambient) ambient->setBrightness(brightness);
+        }
+        if (save) {
+            saveBrightness();
+        }
+    }
+    
+    // Set full LED settings (for Ambient effect): [brightness, r1, g1, b1, r2, g2, b2, gradient, speed, effectId]
+    void setLedSettings(const uint8_t* data, size_t len) {
+        if (len < 10) return;
+        
+        // Store for persistence
+        memcpy(m_ledSettings, data, 10);
+        m_brightness = data[0];
+        
+        // Update Ambient effect
+        AmbientEffect* ambient = static_cast<AmbientEffect*>(m_effects[LED_EFFECT_AMBIENT]);
+        if (ambient) {
+            ambient->setSettings(data, len);
+        }
+        
+        // Save settings to NVS
+        saveLedSettings();
+    }
+    
+    const uint8_t* getLedSettings() const { return m_ledSettings; }
+    
+    void saveLedSettings() {
+        nvs_handle_t handle;
+        if (nvs_open("led", NVS_READWRITE, &handle) == ESP_OK) {
+            nvs_set_blob(handle, "settings", m_ledSettings, 10);
+            nvs_commit(handle);
+            nvs_close(handle);
+            ESP_LOGI(LED_TAG, "Saved LED settings");
+        }
+    }
+    
+    void saveBrightness() {
+        nvs_handle_t handle;
+        if (nvs_open("led", NVS_READWRITE, &handle) == ESP_OK) {
+            nvs_set_u8(handle, "bright", m_brightness);
+            nvs_commit(handle);
+            nvs_close(handle);
+            ESP_LOGI(LED_TAG, "Saved brightness: %d", m_brightness);
+        }
     }
     
     uint8_t getBrightness() const { return m_brightness; }
+    
+    // Set current volume level (0-127 A2DP range)
+    void setVolume(uint8_t volume) {
+        m_currentVolume = volume;
+        
+        // Trigger volume overlay display
+        m_volumeOverlayActive = true;
+        m_volumeOverlayStart = xTaskGetTickCount();
+        m_volumeDisplayTarget = volume;
+        
+        // Update volume effect if active
+        if (m_currentEffect == LED_EFFECT_VOLUME) {
+            VolumeEffect* volEffect = static_cast<VolumeEffect*>(m_effects[LED_EFFECT_VOLUME]);
+            if (volEffect) {
+                volEffect->setVolume(volume);
+            }
+        }
+    }
+    
+    uint8_t getVolume() const { return m_currentVolume; }
+    
+    // Check if volume overlay should be shown
+    bool isVolumeOverlayActive() const {
+        if (!m_volumeOverlayActive) return false;
+        TickType_t elapsed = xTaskGetTickCount() - m_volumeOverlayStart;
+        return elapsed < pdMS_TO_TICKS(VOLUME_OVERLAY_DURATION_MS);
+    }
+    
+    // Get volume overlay fade factor (1.0 = full, 0.0 = faded out)
+    float getVolumeOverlayFade() const {
+        if (!m_volumeOverlayActive) return 0.0f;
+        TickType_t elapsed = xTaskGetTickCount() - m_volumeOverlayStart;
+        uint32_t elapsedMs = pdTICKS_TO_MS(elapsed);
+        
+        if (elapsedMs >= VOLUME_OVERLAY_DURATION_MS) {
+            return 0.0f;
+        }
+        
+        // Hold full brightness for first part, then fade
+        if (elapsedMs < VOLUME_OVERLAY_HOLD_MS) {
+            return 1.0f;
+        }
+        
+        // Fade out over remaining time
+        uint32_t fadeElapsed = elapsedMs - VOLUME_OVERLAY_HOLD_MS;
+        uint32_t fadeDuration = VOLUME_OVERLAY_DURATION_MS - VOLUME_OVERLAY_HOLD_MS;
+        return 1.0f - (float)fadeElapsed / (float)fadeDuration;
+    }
+    
+    // Render volume overlay on the LED matrix
+    void renderVolumeOverlay() {
+        if (!m_initialized) return;
+        
+        float fade = getVolumeOverlayFade();
+        if (fade <= 0.0f) {
+            m_volumeOverlayActive = false;
+            return;
+        }
+        
+        // Smooth the displayed volume
+        float targetVol = m_volumeDisplayTarget / 127.0f;
+        m_volumeDisplaySmooth += (targetVol - m_volumeDisplaySmooth) * 0.3f;
+        
+        m_driver.clear();
+        
+        // Volume percentage (0-100)
+        int volumePercent = (int)(m_volumeDisplaySmooth * 100.0f + 0.5f);
+        
+        // Calculate how many rows to fill (16 rows total)
+        int filledRows = (int)(m_volumeDisplaySmooth * LED_MATRIX_HEIGHT + 0.5f);
+        
+        // Pulsing effect
+        static uint32_t volFrame = 0;
+        volFrame++;
+        float pulse = 0.85f + 0.15f * sinf(volFrame * 0.15f);
+        
+        // Draw volume bar from bottom to top
+        for (int row = 0; row < LED_MATRIX_HEIGHT; row++) {
+            int displayRow = LED_MATRIX_HEIGHT - 1 - row;  // Bottom to top
+            
+            if (row < filledRows) {
+                // Color gradient: white -> red (bottom to top)
+                float rowPct = (float)row / (float)(LED_MATRIX_HEIGHT - 1);
+                uint8_t r, g, b;
+                
+                // White (255,255,255) at bottom, Red (255,0,0) at top
+                r = 255;
+                g = (uint8_t)(255 * (1.0f - rowPct));
+                b = (uint8_t)(255 * (1.0f - rowPct));
+                
+                // Apply pulse and fade
+                float intensity = pulse * fade;
+                r = (uint8_t)(r * intensity);
+                g = (uint8_t)(g * intensity);
+                b = (uint8_t)(b * intensity);
+                
+                // Fill the row with a slight gradient from center outward
+                for (int col = 0; col < LED_MATRIX_WIDTH; col++) {
+                    // Center columns brighter
+                    float colDist = fabsf(col - (LED_MATRIX_WIDTH - 1) / 2.0f) / ((LED_MATRIX_WIDTH - 1) / 2.0f);
+                    float colFade = 1.0f - colDist * 0.3f;  // 70% brightness at edges
+                    
+                    RGB_SPI color = {
+                        (uint8_t)(r * colFade),
+                        (uint8_t)(g * colFade),
+                        (uint8_t)(b * colFade)
+                    };
+                    m_driver.setPixelXY(col, displayRow, color);
+                }
+            }
+        }
+        
+        m_driver.show();
+    }
+    
+    // Draw volume number on the display
+    void drawVolumeNumber(int percent, float fade) {
+        // Simple 3x5 digit font patterns (each digit is 3 wide, 5 tall)
+        static const uint8_t DIGITS[10][5] = {
+            {0b111, 0b101, 0b101, 0b101, 0b111},  // 0
+            {0b010, 0b110, 0b010, 0b010, 0b111},  // 1
+            {0b111, 0b001, 0b111, 0b100, 0b111},  // 2
+            {0b111, 0b001, 0b111, 0b001, 0b111},  // 3
+            {0b101, 0b101, 0b111, 0b001, 0b001},  // 4
+            {0b111, 0b100, 0b111, 0b001, 0b111},  // 5
+            {0b111, 0b100, 0b111, 0b101, 0b111},  // 6
+            {0b111, 0b001, 0b001, 0b001, 0b001},  // 7
+            {0b111, 0b101, 0b111, 0b101, 0b111},  // 8
+            {0b111, 0b101, 0b111, 0b001, 0b111},  // 9
+        };
+        
+        // Clamp percent
+        if (percent < 0) percent = 0;
+        if (percent > 100) percent = 100;
+        
+        // Calculate digits
+        int d1 = percent / 100;       // Hundreds (0 or 1)
+        int d2 = (percent / 10) % 10; // Tens
+        int d3 = percent % 10;        // Ones
+        
+        // Determine how many digits to show
+        int numDigits = (percent >= 100) ? 3 : (percent >= 10) ? 2 : 1;
+        int digitWidth = 3;
+        int spacing = 1;
+        int totalWidth = numDigits * digitWidth + (numDigits - 1) * spacing;
+        
+        // Center horizontally and vertically
+        int startX = (LED_MATRIX_WIDTH - totalWidth) / 2;
+        int startY = (LED_MATRIX_HEIGHT - 5) / 2;
+        
+        // White color with fade
+        uint8_t brightness = (uint8_t)(255 * fade);
+        
+        // Draw digits
+        int x = startX;
+        int digits[3] = {d1, d2, d3};
+        int startDigit = 3 - numDigits;
+        
+        for (int d = startDigit; d < 3; d++) {
+            int digit = digits[d];
+            for (int row = 0; row < 5; row++) {
+                for (int col = 0; col < 3; col++) {
+                    if (DIGITS[digit][row] & (0b100 >> col)) {
+                        int px = x + col;
+                        int py = startY + row;
+                        if (px >= 0 && px < LED_MATRIX_WIDTH && py >= 0 && py < LED_MATRIX_HEIGHT) {
+                            RGB_SPI color = {brightness, brightness, brightness};
+                            m_driver.setPixelXY(px, py, color);
+                        }
+                    }
+                }
+            }
+            x += digitWidth + spacing;
+        }
+    }
     
     void setDemoTimeout(uint32_t timeoutMs) {
         m_demoTimeoutMs = timeoutMs;
@@ -261,6 +487,8 @@ private:
         m_effects[LED_EFFECT_AUDIO_SCOPE] = new AudioScopeEffect();
         m_effects[LED_EFFECT_BOUNCING_BALLS] = new BouncingBallsEffect();
         m_effects[LED_EFFECT_LAVA_LAMP] = new LavaLampEffect();
+        m_effects[LED_EFFECT_AMBIENT] = new AmbientEffect();
+        m_effects[LED_EFFECT_VOLUME] = new VolumeEffect();
     }
     
     LedEffect* getCurrentEffect() {
@@ -285,6 +513,17 @@ private:
                 m_brightness = brightness;
             }
             
+            // Load full LED settings if available
+            size_t len = 10;
+            if (nvs_get_blob(handle, "settings", m_ledSettings, &len) == ESP_OK && len == 10) {
+                // Apply to Ambient effect
+                AmbientEffect* ambient = static_cast<AmbientEffect*>(m_effects[LED_EFFECT_AMBIENT]);
+                if (ambient) {
+                    ambient->setSettings(m_ledSettings, 10);
+                }
+                ESP_LOGI(LED_TAG, "Loaded LED settings blob");
+            }
+            
             nvs_close(handle);
             ESP_LOGI(LED_TAG, "Loaded settings: effect=%d, brightness=%d", m_currentEffect, m_brightness);
         }
@@ -300,11 +539,111 @@ private:
         }
     }
     
+    // Startup animation - colorful spiral wipe
+    void playStartupAnimation() {
+        ESP_LOGI(LED_TAG, "Playing startup animation...");
+        
+        const int totalFrames = 60;  // ~2 seconds at 30fps
+        const int spiralSteps = LED_MATRIX_WIDTH * LED_MATRIX_HEIGHT;
+        
+        // Phase 1: Spiral fill inward with rainbow colors
+        for (int frame = 0; frame < totalFrames / 2; frame++) {
+            m_driver.clear();
+            
+            int ledsToShow = (frame * spiralSteps) / (totalFrames / 2);
+            
+            // Spiral coordinates generator
+            int x = 0, y = 0;
+            int dx = 1, dy = 0;
+            int minX = 0, maxX = LED_MATRIX_WIDTH - 1;
+            int minY = 0, maxY = LED_MATRIX_HEIGHT - 1;
+            
+            for (int i = 0; i < ledsToShow && i < spiralSteps; i++) {
+                // Rainbow color based on position
+                uint8_t hue = (i * 256 / spiralSteps + frame * 4) & 0xFF;
+                uint8_t brightness = m_brightness;
+                RGB color = RGB::fromHSV(hue, 255, brightness);
+                
+                m_driver.setPixelXY(x, y, color);
+                
+                // Move to next position in spiral
+                int nx = x + dx;
+                int ny = y + dy;
+                
+                if (dx == 1 && nx > maxX) { dx = 0; dy = 1; minY++; }
+                else if (dy == 1 && ny > maxY) { dx = -1; dy = 0; maxX--; }
+                else if (dx == -1 && nx < minX) { dx = 0; dy = -1; maxY--; }
+                else if (dy == -1 && ny < minY) { dx = 1; dy = 0; minX++; }
+                
+                x += dx;
+                y += dy;
+            }
+            
+            m_driver.setBrightness(m_brightness);
+            m_driver.show();
+            vTaskDelay(pdMS_TO_TICKS(33));  // ~30fps
+        }
+        
+        // Phase 2: Color pulse from center
+        for (int frame = 0; frame < totalFrames / 4; frame++) {
+            float cx = (LED_MATRIX_WIDTH - 1) / 2.0f;
+            float cy = (LED_MATRIX_HEIGHT - 1) / 2.0f;
+            float maxDist = sqrtf(cx * cx + cy * cy);
+            float pulse = (float)frame / (totalFrames / 4);
+            
+            for (int y = 0; y < LED_MATRIX_HEIGHT; y++) {
+                for (int x = 0; x < LED_MATRIX_WIDTH; x++) {
+                    float dx = x - cx;
+                    float dy = y - cy;
+                    float dist = sqrtf(dx * dx + dy * dy) / maxDist;
+                    
+                    // Wave effect from center
+                    float wave = sinf((dist - pulse * 2) * 6.28f);
+                    if (wave < 0) wave = 0;
+                    
+                    uint8_t hue = (uint8_t)((dist * 128 + frame * 8) * 255) & 0xFF;
+                    uint8_t v = (uint8_t)(wave * m_brightness);
+                    
+                    RGB color = RGB::fromHSV(hue, 255, v);
+                    m_driver.setPixelXY(x, y, color);
+                }
+            }
+            
+            m_driver.setBrightness(255);  // Brightness already applied per-pixel
+            m_driver.show();
+            vTaskDelay(pdMS_TO_TICKS(33));
+        }
+        
+        // Phase 3: Quick flash and fade
+        for (int frame = 0; frame < totalFrames / 4; frame++) {
+            float fade = 1.0f - (float)frame / (totalFrames / 4);
+            uint8_t v = (uint8_t)(fade * m_brightness);
+            
+            // Cyan/white flash
+            RGB color = RGB(v / 2, v, v);
+            for (int y = 0; y < LED_MATRIX_HEIGHT; y++) {
+                for (int x = 0; x < LED_MATRIX_WIDTH; x++) {
+                    m_driver.setPixelXY(x, y, color);
+                }
+            }
+            
+            m_driver.setBrightness(255);
+            m_driver.show();
+            vTaskDelay(pdMS_TO_TICKS(33));
+        }
+        
+        m_driver.clear();
+        m_driver.show();
+        ESP_LOGI(LED_TAG, "Startup animation complete");
+    }
+    
     LedDriverSPI m_driver;  // SPI DMA driver
     LedEffect* m_effects[LED_EFFECT_COUNT] = {nullptr};
     
     int m_currentEffect = LED_EFFECT_SPECTRUM_BARS;
     uint8_t m_brightness = LED_DEFAULT_BRIGHTNESS;
+    uint8_t m_currentVolume = 64;  // Current volume level (0-127)
+    uint8_t m_ledSettings[10] = {128, 255, 0, 128, 0, 128, 255, 0, 50, 0};  // Default LED settings
     bool m_initialized = false;
     
     bool m_inDemoMode = true;
@@ -314,6 +653,14 @@ private:
     // OTA progress display
     bool m_otaMode = false;
     uint8_t m_otaProgress = 0;
+    
+    // Volume overlay display
+    static constexpr uint32_t VOLUME_OVERLAY_DURATION_MS = 2500;  // Total display time
+    static constexpr uint32_t VOLUME_OVERLAY_HOLD_MS = 1500;      // Hold at full brightness
+    bool m_volumeOverlayActive = false;
+    TickType_t m_volumeOverlayStart = 0;
+    uint8_t m_volumeDisplayTarget = 64;
+    float m_volumeDisplaySmooth = 0.5f;
 };
 
 // -----------------------------------------------------------
@@ -526,6 +873,13 @@ static void ledTask(void* param) {
         // Check if in OTA mode - render progress bar instead of effects
         if (controller.isOtaMode()) {
             controller.renderOtaProgress();
+            vTaskDelayUntil(&lastWake, frameDelay);
+            continue;
+        }
+        
+        // Check if volume overlay should be shown (takes priority)
+        if (controller.isVolumeOverlayActive()) {
+            controller.renderVolumeOverlay();
             vTaskDelayUntil(&lastWake, frameDelay);
             continue;
         }

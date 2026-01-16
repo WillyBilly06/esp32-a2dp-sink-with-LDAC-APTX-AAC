@@ -1742,3 +1742,297 @@ private:
     static const int NUM_BLOBS = 4;
     Blob m_blobs[NUM_BLOBS];
 };
+
+// ============================================================
+// AMBIENT EFFECT - Configurable ambient lighting with user colors
+// Supports: solid color, horizontal/vertical/radial/diagonal gradients
+// User configurable: 2 colors, gradient type, speed, brightness
+// ============================================================
+class AmbientEffect : public LedEffect {
+public:
+    void init(LedDriver* driver) override {
+        m_driver = driver;
+        m_frame = 0;
+        m_phase = 0.0f;
+        // Default colors (can be updated via setSettings)
+        m_color1 = RGB(255, 0, 128);   // Magenta-ish
+        m_color2 = RGB(0, 128, 255);   // Cyan-ish
+        m_gradientType = 0;            // None (solid)
+        m_speed = 50;
+        m_brightness = 128;
+    }
+    
+    // Set LED settings from BLE: [brightness, r1, g1, b1, r2, g2, b2, gradient, speed, effectId]
+    void setSettings(const uint8_t* data, size_t len) {
+        if (len >= 10) {
+            m_brightness = data[0];
+            m_color1 = RGB(data[1], data[2], data[3]);
+            m_color2 = RGB(data[4], data[5], data[6]);
+            m_gradientType = data[7];
+            m_speed = data[8];
+            // data[9] is effectId, handled elsewhere
+        }
+    }
+    
+    void setBrightness(uint8_t brightness) { m_brightness = brightness; }
+    void setColors(RGB c1, RGB c2) { m_color1 = c1; m_color2 = c2; }
+    void setGradientType(uint8_t type) { m_gradientType = type; }
+    void setSpeed(uint8_t speed) { m_speed = speed; }
+    
+    void update(const AudioData& audio) override {
+        m_frame++;
+        
+        // Animation phase based on speed (0-255 maps to slow-fast)
+        float speedFactor = (m_speed / 255.0f) * 0.1f;
+        m_phase += speedFactor;
+        if (m_phase > 1.0f) m_phase -= 1.0f;
+        
+        // Render based on gradient type
+        switch (m_gradientType) {
+            case GRADIENT_NONE:
+                renderSolid();
+                break;
+            case GRADIENT_LINEAR_H:
+                renderLinearH();
+                break;
+            case GRADIENT_LINEAR_V:
+                renderLinearV();
+                break;
+            case GRADIENT_RADIAL:
+                renderRadial();
+                break;
+            case GRADIENT_DIAGONAL:
+                renderDiagonal();
+                break;
+            default:
+                renderSolid();
+                break;
+        }
+    }
+    
+    void updateDemo() override {
+        m_frame++;
+        AudioData demo;
+        demo.bass = 0.3f;
+        demo.mid = 0.25f;
+        demo.high = 0.2f;
+        demo.beat = false;
+        update(demo);
+    }
+    
+    const char* getName() const override { return "Ambient"; }
+    
+private:
+    RGB m_color1;
+    RGB m_color2;
+    uint8_t m_gradientType;
+    uint8_t m_speed;
+    uint8_t m_brightness;
+    float m_phase;
+    
+    // Interpolate between two colors
+    RGB lerpColor(RGB c1, RGB c2, float t) {
+        // Add phase offset for animation
+        t = fmodf(t + m_phase, 1.0f);
+        uint8_t r = (uint8_t)(c1.r + (c2.r - c1.r) * t);
+        uint8_t g = (uint8_t)(c1.g + (c2.g - c1.g) * t);
+        uint8_t b = (uint8_t)(c1.b + (c2.b - c1.b) * t);
+        return RGB(r, g, b);
+    }
+    
+    RGB applyBrightness(RGB c) {
+        float scale = m_brightness / 255.0f;
+        return RGB((uint8_t)(c.r * scale), (uint8_t)(c.g * scale), (uint8_t)(c.b * scale));
+    }
+    
+    void renderSolid() {
+        RGB color = applyBrightness(m_color1);
+        for (int y = 0; y < LED_MATRIX_HEIGHT; y++) {
+            for (int x = 0; x < LED_MATRIX_WIDTH; x++) {
+                m_driver->setPixelXY(x, y, color);
+            }
+        }
+    }
+    
+    void renderLinearH() {
+        for (int y = 0; y < LED_MATRIX_HEIGHT; y++) {
+            for (int x = 0; x < LED_MATRIX_WIDTH; x++) {
+                float t = (float)x / (LED_MATRIX_WIDTH - 1);
+                RGB color = lerpColor(m_color1, m_color2, t);
+                m_driver->setPixelXY(x, y, applyBrightness(color));
+            }
+        }
+    }
+    
+    void renderLinearV() {
+        for (int y = 0; y < LED_MATRIX_HEIGHT; y++) {
+            float t = (float)y / (LED_MATRIX_HEIGHT - 1);
+            RGB color = lerpColor(m_color1, m_color2, t);
+            color = applyBrightness(color);
+            for (int x = 0; x < LED_MATRIX_WIDTH; x++) {
+                m_driver->setPixelXY(x, y, color);
+            }
+        }
+    }
+    
+    void renderRadial() {
+        float cx = (LED_MATRIX_WIDTH - 1) / 2.0f;
+        float cy = (LED_MATRIX_HEIGHT - 1) / 2.0f;
+        float maxDist = sqrtf(cx * cx + cy * cy);
+        
+        for (int y = 0; y < LED_MATRIX_HEIGHT; y++) {
+            for (int x = 0; x < LED_MATRIX_WIDTH; x++) {
+                float dx = x - cx;
+                float dy = y - cy;
+                float dist = sqrtf(dx * dx + dy * dy);
+                float t = dist / maxDist;
+                RGB color = lerpColor(m_color1, m_color2, t);
+                m_driver->setPixelXY(x, y, applyBrightness(color));
+            }
+        }
+    }
+    
+    void renderDiagonal() {
+        float maxDiag = (float)(LED_MATRIX_WIDTH + LED_MATRIX_HEIGHT - 2);
+        for (int y = 0; y < LED_MATRIX_HEIGHT; y++) {
+            for (int x = 0; x < LED_MATRIX_WIDTH; x++) {
+                float t = (float)(x + y) / maxDiag;
+                RGB color = lerpColor(m_color1, m_color2, t);
+                m_driver->setPixelXY(x, y, applyBrightness(color));
+            }
+        }
+    }
+};
+
+// ============================================================
+// VOLUME VISUALIZER EFFECT
+// Displays current volume level as a colorful bar/ring visualization
+// ============================================================
+class VolumeEffect : public LedEffect {
+public:
+    void init(LedDriver* driver) override {
+        m_driver = driver;
+        m_frame = 0;
+        m_displayVolume = 0.0f;
+        m_targetVolume = 0.0f;
+        m_pulsePhase = 0.0f;
+        m_lastChangeTime = 0;
+    }
+    
+    void setVolume(uint8_t volume) {
+        // Volume is 0-127 (A2DP range), convert to 0.0-1.0
+        m_targetVolume = volume / 127.0f;
+        m_lastChangeTime = m_frame;
+    }
+    
+    void update(const AudioData& audio) override {
+        m_frame++;
+        
+        // Smooth volume transitions
+        float diff = m_targetVolume - m_displayVolume;
+        if (fabsf(diff) > 0.001f) {
+            m_displayVolume += diff * 0.2f;  // Smooth interpolation
+        }
+        
+        // Pulse effect when volume recently changed
+        uint32_t sinceLast = m_frame - m_lastChangeTime;
+        float pulse = 0.0f;
+        if (sinceLast < 30) {  // ~1 second of pulsing
+            pulse = sinf(sinceLast * 0.3f) * (1.0f - sinceLast / 30.0f);
+        }
+        
+        m_pulsePhase += 0.05f;
+        if (m_pulsePhase > 6.28f) m_pulsePhase -= 6.28f;
+        
+        m_driver->clear();
+        
+        // Calculate how many rows to light up (bottom to top)
+        int totalRows = LED_MATRIX_HEIGHT;
+        int litRows = (int)(m_displayVolume * totalRows + 0.5f);
+        
+        // Render volume bar with color gradient
+        for (int y = 0; y < LED_MATRIX_HEIGHT; y++) {
+            int rowFromBottom = LED_MATRIX_HEIGHT - 1 - y;
+            
+            if (rowFromBottom < litRows) {
+                // Color gradient: green (low) -> yellow (mid) -> red (high)
+                float rowLevel = (float)rowFromBottom / (totalRows - 1);
+                uint8_t hue;
+                if (rowLevel < 0.5f) {
+                    hue = 96;  // Green
+                } else if (rowLevel < 0.75f) {
+                    hue = 64;  // Yellow
+                } else if (rowLevel < 0.9f) {
+                    hue = 32;  // Orange
+                } else {
+                    hue = 0;   // Red
+                }
+                
+                // Add brightness variation along x for wave effect
+                for (int x = 0; x < LED_MATRIX_WIDTH; x++) {
+                    float xWave = sinf(x * 0.4f + m_pulsePhase) * 0.15f + 0.85f;
+                    float brightness = xWave * (1.0f + pulse * 0.3f);
+                    if (brightness > 1.0f) brightness = 1.0f;
+                    
+                    uint8_t v = (uint8_t)(brightness * 255);
+                    RGB color = RGB::fromHSV(hue, 255, v);
+                    m_driver->setPixelXY(x, y, color);
+                }
+            } else if (rowFromBottom == litRows && litRows < totalRows) {
+                // Top edge glow - dimmer
+                uint8_t hue = (litRows < totalRows / 2) ? 96 : 
+                              (litRows < totalRows * 3 / 4) ? 64 : 32;
+                uint8_t v = 60 + (uint8_t)(pulse * 40);
+                RGB color = RGB::fromHSV(hue, 255, v);
+                for (int x = 0; x < LED_MATRIX_WIDTH; x++) {
+                    m_driver->setPixelXY(x, y, color);
+                }
+            }
+        }
+        
+        // Add volume percentage indicator in center (using dots)
+        int percent = (int)(m_displayVolume * 100);
+        renderVolumeNumber(percent);
+    }
+    
+    void updateDemo() override {
+        m_frame++;
+        // Demo mode: cycle through volume levels
+        float demoLevel = (sinf(m_frame * 0.02f) + 1.0f) * 0.5f;
+        m_targetVolume = demoLevel;
+        AudioData demo = {};
+        update(demo);
+    }
+    
+    const char* getName() const override { return "Volume"; }
+    
+private:
+    float m_displayVolume;
+    float m_targetVolume;
+    float m_pulsePhase;
+    uint32_t m_lastChangeTime;
+    
+    // Simple digit rendering in center of matrix
+    void renderVolumeNumber(int percent) {
+        // Only render if there's enough space (16x16 matrix)
+        if (LED_MATRIX_WIDTH < 16 || LED_MATRIX_HEIGHT < 16) return;
+        
+        // Draw percentage in 3x5 pixel digits at center
+        int cx = LED_MATRIX_WIDTH / 2;
+        int cy = LED_MATRIX_HEIGHT / 2;
+        
+        RGB white(200, 200, 200);
+        
+        // For simplicity, just draw 3 dots to indicate volume range
+        // Low (left dot), Medium (center dot), High (right dot)
+        int dots = (percent < 33) ? 1 : (percent < 66) ? 2 : 3;
+        
+        for (int i = 0; i < dots; i++) {
+            int dx = cx - 3 + i * 3;
+            m_driver->setPixelXY(dx, cy, white);
+            m_driver->setPixelXY(dx + 1, cy, white);
+            m_driver->setPixelXY(dx, cy + 1, white);
+            m_driver->setPixelXY(dx + 1, cy + 1, white);
+        }
+    }
+};
