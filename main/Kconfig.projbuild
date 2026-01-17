@@ -254,4 +254,39 @@ menu "A2DP DSP BLE Configuration"
                 Height of the LED matrix.
     endmenu
 
+    menu "Rotary Encoder Configuration"
+        config ENCODER_ENABLE
+            bool "Enable Quad Rotary Encoder"
+            default y
+            help
+                Enable Adafruit Quad Rotary Encoder Breakout (Product 5752)
+                for hardware control of volume, EQ, and brightness.
+                Single I2C device with 4 rotary encoders.
+
+        config ENCODER_I2C_SDA_GPIO
+            int "Encoder I2C SDA GPIO"
+            default 23
+            range 0 39
+            depends on ENCODER_ENABLE
+            help
+                GPIO pin for encoder I2C data line (SDA).
+
+        config ENCODER_I2C_SCL_GPIO
+            int "Encoder I2C SCL GPIO"
+            default 22
+            range 0 39
+            depends on ENCODER_ENABLE
+            help
+                GPIO pin for encoder I2C clock line (SCL).
+
+        config ENCODER_ADDR_QUAD
+            hex "Quad Encoder I2C address"
+            default 0x07
+            range 0x03 0x7F
+            depends on ENCODER_ENABLE
+            help
+                I2C address for the Quad Rotary Encoder Breakout.
+                Default 0x07 (user configured).
+    endmenu
+
 endmenu
