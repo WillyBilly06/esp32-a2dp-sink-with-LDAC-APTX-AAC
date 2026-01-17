@@ -172,7 +172,6 @@ export.bat
 
 :: Build and flash
 cd D:\path\to\project
-idf.py set-target esp32
 idf.py build
 idf.py -p COM10 flash
 ```
