@@ -686,6 +686,16 @@ CONFIG_LED_MATRIX_WIDTH=16
 # default:
 CONFIG_LED_MATRIX_HEIGHT=16
 # end of LED Matrix Configuration
+
+#
+# Rotary Encoder Configuration
+#
+# default:
+CONFIG_ENCODER_ENABLE=y
+CONFIG_ENCODER_I2C_SDA_GPIO=23
+CONFIG_ENCODER_I2C_SCL_GPIO=22
+CONFIG_ENCODER_ADDR_QUAD=0x07
+# end of Rotary Encoder Configuration
 # end of A2DP DSP BLE Configuration
 
 #

@@ -28,6 +28,11 @@
 #include "led/led_controller.h"
 #endif
 
+// Encoder support
+#ifdef CONFIG_ENCODER_ENABLE
+#include "input/encoder_controller.h"
+#endif
+
 static const char* TAG = "Main";
 
 // -----------------------------------------------------------
@@ -75,7 +80,63 @@ static void applyEq(int8_t bass, int8_t mid, int8_t treble) {
     g_dsp.setEQ(bass, mid, treble, g_sampleRate);
     g_settings.saveEQ(bass, mid, treble);
     g_ble.updateEq(bass, mid, treble);
+    
+    // Sync encoder controller if encoders are enabled
+    #ifdef CONFIG_ENCODER_ENABLE
+    EncoderController::getInstance().setCurrentEq(bass, mid, treble);
+    #endif
 }
+
+// -----------------------------------------------------------
+// Encoder callbacks (hardware rotary encoders)
+// -----------------------------------------------------------
+#ifdef CONFIG_ENCODER_ENABLE
+static void onEncoderVolume(uint8_t volume) {
+    // Volume encoder: set absolute volume (0-127)
+    g_a2dp.set_volume(volume);
+    
+    // Update LED effect with volume level
+    #ifdef CONFIG_LED_MATRIX_ENABLE
+    LedController::getInstance().setVolume(volume);
+    #endif
+    
+    ESP_LOGI(TAG, "Encoder volume: %d", volume);
+}
+
+static void onEncoderPlayPause() {
+    // Volume encoder button: toggle play/pause
+    static bool isPlaying = true;
+    if (isPlaying) {
+        g_a2dp.pause();
+    } else {
+        g_a2dp.play();
+    }
+    isPlaying = !isPlaying;
+    ESP_LOGI(TAG, "Encoder: %s", isPlaying ? "play" : "pause");
+}
+
+static void onEncoderEq(int8_t bass, int8_t mid, int8_t treble) {
+    // EQ encoders: apply new values and sync to app
+    applyEq(bass, mid, treble);
+    ESP_LOGI(TAG, "Encoder EQ: %d/%d/%d", bass, mid, treble);
+}
+
+static void onEncoderBrightness(uint8_t brightness) {
+    // Bass encoder button: cycle brightness
+    #ifdef CONFIG_LED_MATRIX_ENABLE
+    LedController::getInstance().setBrightness(brightness, true);  // Save to NVS
+    
+    // Notify app - copy current LED settings and update brightness
+    const uint8_t* currentSettings = LedController::getInstance().getLedSettings();
+    uint8_t settings[10];
+    memcpy(settings, currentSettings, 10);
+    settings[0] = brightness;  // Update brightness byte
+    g_ble.updateLedSettings(settings, sizeof(settings));
+    
+    ESP_LOGI(TAG, "Encoder brightness: %d", brightness);
+    #endif
+}
+#endif
 
 // -----------------------------------------------------------
 // BLE callbacks
@@ -625,12 +686,17 @@ extern "C" void app_main(void) {
     g_a2dp.set_on_connection_state_changed(onConnectionState);
     g_a2dp.set_on_audio_state_changed(onAudioState);
     
-    // Volume change callback for LED effect
-    #ifdef CONFIG_LED_MATRIX_ENABLE
+    // Volume change callback - sync with LED and encoder controller
     g_a2dp.set_avrc_rn_volumechange([](int volume) {
+        #ifdef CONFIG_LED_MATRIX_ENABLE
         LedController::getInstance().setVolume((uint8_t)volume);
+        #endif
+        #ifdef CONFIG_ENCODER_ENABLE
+        // Sync encoder controller with phone's volume so local adjustments are relative
+        EncoderController::getInstance().setCurrentVolume((uint8_t)volume);
+        ESP_LOGI(TAG, "Phone volume changed to %d - encoder synced", volume);
+        #endif
     });
-    #endif
     
     g_a2dp.start(deviceName.c_str());
     ESP_LOGI(TAG, "A2DP started as '%s'", deviceName.c_str());
@@ -654,6 +720,28 @@ extern "C" void app_main(void) {
     startLedTask(&g_dsp, 3, 4096);  // 4KB stack - no PSRAM, conserve memory
     #endif
     ESP_LOGI(TAG, "LED matrix started on GPIO %d", CONFIG_LED_MATRIX_GPIO);
+    #endif
+
+    // Initialize and start encoder task
+    #ifdef CONFIG_ENCODER_ENABLE
+    {
+        auto& enc = EncoderController::getInstance();
+        enc.setVolumeCallback(onEncoderVolume);
+        enc.setPlayPauseCallback(onEncoderPlayPause);
+        enc.setEqCallback(onEncoderEq);
+        enc.setBrightnessCallback(onEncoderBrightness);
+        
+        // Set initial values from NVS
+        enc.setCurrentVolume((uint8_t)g_a2dp.get_volume());  // Get current volume (0-127)
+        enc.setCurrentEq(eqBass, eqMid, eqTreble);
+        #ifdef CONFIG_LED_MATRIX_ENABLE
+        enc.setCurrentBrightness(LedController::getInstance().getBrightness());
+        #endif
+        
+        startEncoderTask();  // Uses default priority 2, pinned to core 0
+        ESP_LOGI(TAG, "Encoder controller started on I2C SDA=%d, SCL=%d",
+                 ENCODER_I2C_SDA_GPIO, ENCODER_I2C_SCL_GPIO);
+    }
     #endif
 
     ESP_LOGI(TAG, "System ready");
