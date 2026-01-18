@@ -50,6 +50,28 @@
 
 </td>
 </tr>
+<tr>
+<td width="50%">
+
+###  Hardware Control
+- **Quad Rotary Encoder** support (Adafruit 5752)
+- Volume, Bass, Mid, Treble controls
+- **LED effect selection** via encoder
+- **Brightness adjustment** mode
+- Multi-click detection (play/pause/next/prev)
+
+</td>
+<td width="50%">
+
+###  Visual Feedback
+- **16×16 LED Matrix** effects
+- 24 audio-reactive LED effects
+- Volume/EQ overlay display
+- **Pairing mode** LED animation
+- Effect preview via encoder
+
+</td>
+</tr>
 </table>
 
 ---
@@ -75,6 +97,27 @@
 | **PSRAM** | Optional (8MB recommended) | Enables larger buffers for LDAC/AAC |
 | **Flash** | 8MB | Enables OTA dual partition |
 | **DAC** | I2S compatible | PCM5102, MAX98357A, etc. |
+| **Encoder** | Adafruit Quad Rotary (5752) | Optional - I2C control interface |
+| **LED Matrix** | 16×16 WS2812B | Optional - SPI/DMA driven |
+
+### Quad Rotary Encoder (Adafruit 5752)
+
+The firmware supports the [Adafruit I2C QT Quad Rotary Encoder](https://www.adafruit.com/product/5752) for hardware controls:
+
+| Encoder | Function | Button Action |
+|:--------|:---------|:--------------|
+| **Volume** (Green) | Adjust volume | 1-click: Play/Pause, 2-click: Next, 3-click: Previous |
+| **Bass** (Red) | Adjust bass EQ | Click: Enter brightness mode, rotate to adjust |
+| **Mid** (Blue) | Adjust mid EQ | Click: Enter Bluetooth pairing mode |
+| **Treble** (Yellow) | Adjust treble EQ | Click: Enter effect selection mode, rotate to preview |
+
+**Wiring:**
+| Encoder Pin | ESP32 GPIO |
+|:------------|:-----------|
+| SDA | GPIO 23 |
+| SCL | GPIO 22 |
+| VIN | 3.3V |
+| GND | GND |
 
 ### PSRAM vs Non-PSRAM Mode
 

@@ -104,7 +104,7 @@ static void onEncoderVolume(uint8_t volume) {
 }
 
 static void onEncoderPlayPause() {
-    // Volume encoder button: toggle play/pause
+    // Volume encoder button single click: toggle play/pause
     static bool isPlaying = true;
     if (isPlaying) {
         g_a2dp.pause();
@@ -115,14 +115,40 @@ static void onEncoderPlayPause() {
     ESP_LOGI(TAG, "Encoder: %s", isPlaying ? "play" : "pause");
 }
 
+static void onEncoderNextTrack() {
+    // Volume encoder button double click: next track
+    g_a2dp.next();
+    ESP_LOGI(TAG, "Encoder: next track");
+}
+
+static void onEncoderPrevTrack() {
+    // Volume encoder button triple click: previous track
+    g_a2dp.previous();
+    ESP_LOGI(TAG, "Encoder: previous track");
+}
+
 static void onEncoderEq(int8_t bass, int8_t mid, int8_t treble) {
     // EQ encoders: apply new values and sync to app
     applyEq(bass, mid, treble);
+    
+    // Show EQ overlay on LED matrix
+    #ifdef CONFIG_LED_MATRIX_ENABLE
+    // Determine which EQ band changed (simple heuristic: compare to cached values)
+    static int8_t lastBass = 0, lastMid = 0, lastTreble = 0;
+    uint8_t changedType = 255;  // 255 = unknown/all
+    if (bass != lastBass) changedType = 0;
+    else if (mid != lastMid) changedType = 1;
+    else if (treble != lastTreble) changedType = 2;
+    lastBass = bass; lastMid = mid; lastTreble = treble;
+    
+    LedController::getInstance().setEq(bass, mid, treble, changedType);
+    #endif
+    
     ESP_LOGI(TAG, "Encoder EQ: %d/%d/%d", bass, mid, treble);
 }
 
 static void onEncoderBrightness(uint8_t brightness) {
-    // Bass encoder button: cycle brightness
+    // Bass encoder button: adjust brightness
     #ifdef CONFIG_LED_MATRIX_ENABLE
     LedController::getInstance().setBrightness(brightness, true);  // Save to NVS
     
@@ -134,6 +160,53 @@ static void onEncoderBrightness(uint8_t brightness) {
     g_ble.updateLedSettings(settings, sizeof(settings));
     
     ESP_LOGI(TAG, "Encoder brightness: %d", brightness);
+    #endif
+}
+
+static void onEncoderPairingMode() {
+    // Mid encoder button: enter pairing mode
+    // If connected, disconnect first
+    esp_a2d_connection_state_t state = g_a2dp.get_connection_state();
+    
+    if (state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
+        ESP_LOGI(TAG, "Disconnecting current device to enter pairing mode...");
+        g_a2dp.disconnect();
+        vTaskDelay(pdMS_TO_TICKS(500));  // Wait for disconnect
+    }
+    
+    // Enable discoverable mode for new device pairing
+    // ESP_BT_GENERAL_DISCOVERABLE = visible to all devices for pairing
+    ESP_LOGI(TAG, "Entering pairing mode - device is now discoverable");
+    g_a2dp.set_discoverability(ESP_BT_GENERAL_DISCOVERABLE);
+    
+    // Start pairing mode LED animation (slow blue pulsing)
+    #ifdef CONFIG_LED_MATRIX_ENABLE
+    LedController::getInstance().setPairingMode(true);
+    #endif
+}
+
+static void onEncoderEffectChange(int effectId, bool confirmed) {
+    // Treble encoder: change LED effect
+    #ifdef CONFIG_LED_MATRIX_ENABLE
+    // Preview mode: don't save to NVS (save=false)
+    // Confirmed mode: save to NVS (save=true)
+    LedController::getInstance().setEffect(effectId, confirmed);
+    
+    // Always notify app of effect change (both preview and confirmed)
+    g_ble.updateLedEffect((uint8_t)effectId);
+    
+    if (confirmed) {
+        // Effect confirmed - also update full LED settings
+        const uint8_t* currentSettings = LedController::getInstance().getLedSettings();
+        g_ble.updateLedSettings(currentSettings, 10);
+        
+        ESP_LOGI(TAG, "Encoder effect confirmed: %d (%s)", effectId, 
+                 LedController::getInstance().getCurrentEffectName());
+    } else {
+        // Just previewing
+        ESP_LOGI(TAG, "Encoder effect preview: %d (%s)", effectId, 
+                 LedController::getInstance().getCurrentEffectName());
+    }
     #endif
 }
 #endif
@@ -148,6 +221,25 @@ static void onBleControl(uint8_t ctrl) {
 
 static void onBleEq(int8_t bass, int8_t mid, int8_t treble) {
     applyEq(bass, mid, treble);
+    
+    // Sync encoder controller's EQ values
+    #ifdef CONFIG_ENCODER_ENABLE
+    EncoderController::getInstance().setCurrentEq(bass, mid, treble);
+    #endif
+    
+    // Show EQ overlay on LED matrix (same as encoder)
+    #ifdef CONFIG_LED_MATRIX_ENABLE
+    // Determine which EQ band changed (compare to cached values)
+    static int8_t lastBleBass = 0, lastBleMid = 0, lastBleTreble = 0;
+    uint8_t changedType = 255;  // 255 = unknown/all
+    if (bass != lastBleBass) changedType = 0;
+    else if (mid != lastBleMid) changedType = 1;
+    else if (treble != lastBleTreble) changedType = 2;
+    lastBleBass = bass; lastBleMid = mid; lastBleTreble = treble;
+    
+    LedController::getInstance().setEq(bass, mid, treble, changedType);
+    #endif
+    
     ESP_LOGI(TAG, "BLE EQ: %d/%d/%d", bass, mid, treble);
 }
 
@@ -164,6 +256,12 @@ static void onBleLedEffect(uint8_t effectId) {
     LedController::getInstance().setEffect(effectId);
     g_settings.saveLedEffect(effectId);
     g_ble.updateLedEffect(effectId);
+    
+    // Sync encoder controller's effect value
+    #ifdef CONFIG_ENCODER_ENABLE
+    EncoderController::getInstance().setCurrentEffect(effectId);
+    #endif
+    
     ESP_LOGI(TAG, "LED effect: %s", LedController::getInstance().getCurrentEffectName());
 }
 
@@ -173,6 +271,15 @@ static void onBleLedSettings(const uint8_t* data, size_t len) {
     
     // Pass to LED controller (handles brightness + ambient effect settings)
     LedController::getInstance().setLedSettings(data, len);
+    
+    // Sync encoder controller's brightness value
+    #ifdef CONFIG_ENCODER_ENABLE
+    EncoderController::getInstance().setCurrentBrightness(data[0]);
+    // Effect ID is at index 9 if present
+    if (len >= 10) {
+        EncoderController::getInstance().setCurrentEffect(data[9]);
+    }
+    #endif
     
     // Notify back to app
     g_ble.updateLedSettings(data, len);
@@ -397,8 +504,32 @@ static void onConnectionState(esp_a2d_connection_state_t state, void* user) {
         g_pipeline.clear();
         g_i2s.updateClock(APP_I2S_DEFAULT_SAMPLE_RATE);
         g_dsp.setSampleRate(APP_I2S_DEFAULT_SAMPLE_RATE);
+        
+        // The library sets connectable=true on disconnect, but we want to stay non-discoverable
+        // Wait for library to finish, then disable discoverable mode again
+        vTaskDelay(pdMS_TO_TICKS(50));
+        g_a2dp.set_discoverability(ESP_BT_NON_DISCOVERABLE);
+        ESP_LOGI(TAG, "Discoverability disabled - press pairing button for new devices");
+        
+        // Stop pairing animation if running (user disconnected during pairing)
+        #ifdef CONFIG_LED_MATRIX_ENABLE
+        LedController::getInstance().setPairingMode(false);
+        #endif
     } else if (state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
         ESP_LOGI(TAG, "A2DP connected - codec will be configured shortly...");
+        // Disable discoverable mode once connected - only reconnect allowed
+        g_a2dp.set_discoverability(ESP_BT_NON_DISCOVERABLE);
+        ESP_LOGI(TAG, "Pairing mode disabled - device no longer discoverable");
+        
+        // Show pairing success animation if we were in pairing mode
+        #ifdef CONFIG_LED_MATRIX_ENABLE
+        if (LedController::getInstance().isPairingModeActive()) {
+            LedController::getInstance().showPairingSuccess();
+        } else {
+            // Just in case, stop pairing mode
+            LedController::getInstance().setPairingMode(false);
+        }
+        #endif
     }
 }
 
@@ -699,7 +830,16 @@ extern "C" void app_main(void) {
     });
     
     g_a2dp.start(deviceName.c_str());
-    ESP_LOGI(TAG, "A2DP started as '%s'", deviceName.c_str());
+    
+    // Wait for A2DP stack to fully initialize before changing discoverability
+    // The library sets connectable=true during init, we need to override after
+    vTaskDelay(pdMS_TO_TICKS(100));
+    
+    // Disable discoverable mode at startup - only allow auto-reconnect from paired devices
+    // User must press middle encoder button to enter pairing mode for new devices
+    // ESP_BT_NON_DISCOVERABLE = connectable (for reconnect) but not visible for new pairings
+    g_a2dp.set_discoverability(ESP_BT_NON_DISCOVERABLE);
+    ESP_LOGI(TAG, "A2DP started as '%s' - discoverability DISABLED (reconnect only)", deviceName.c_str());
 
     // Log memory status before starting tasks
     ESP_LOGI(TAG, "Free heap: internal=%u KB, PSRAM=%u KB",
@@ -728,14 +868,20 @@ extern "C" void app_main(void) {
         auto& enc = EncoderController::getInstance();
         enc.setVolumeCallback(onEncoderVolume);
         enc.setPlayPauseCallback(onEncoderPlayPause);
+        enc.setNextTrackCallback(onEncoderNextTrack);
+        enc.setPrevTrackCallback(onEncoderPrevTrack);
         enc.setEqCallback(onEncoderEq);
         enc.setBrightnessCallback(onEncoderBrightness);
+        enc.setPairingModeCallback(onEncoderPairingMode);
+        enc.setEffectCallback(onEncoderEffectChange);
         
         // Set initial values from NVS
         enc.setCurrentVolume((uint8_t)g_a2dp.get_volume());  // Get current volume (0-127)
         enc.setCurrentEq(eqBass, eqMid, eqTreble);
         #ifdef CONFIG_LED_MATRIX_ENABLE
         enc.setCurrentBrightness(LedController::getInstance().getBrightness());
+        enc.setCurrentEffect(LedController::getInstance().getCurrentEffectId());
+        enc.setMaxEffect(LED_EFFECT_COUNT);
         #endif
         
         startEncoderTask();  // Uses default priority 2, pinned to core 0

@@ -127,14 +127,16 @@ public:
         saveSettings();
     }
     
-    void setEffect(int effectId) {
+    void setEffect(int effectId, bool save = true) {
         if (effectId >= 0 && effectId < LED_EFFECT_COUNT) {
             m_currentEffect = effectId;
             LedEffect* effect = getCurrentEffect();
             if (effect) {
                 effect->init(&m_driver);
             }
-            saveSettings();
+            if (save) {
+                saveSettings();
+            }
         }
     }
     
@@ -226,6 +228,232 @@ public:
     }
     
     uint8_t getVolume() const { return m_currentVolume; }
+    
+    // Set current EQ levels (-12 to +12 dB) - triggers EQ overlay display
+    void setEq(int8_t bass, int8_t mid, int8_t treble, uint8_t changedType = 255) {
+        m_eqBass = bass;
+        m_eqMid = mid;
+        m_eqTreble = treble;
+        m_eqType = changedType;  // 0=bass, 1=mid, 2=treble, 255=all
+        
+        // Trigger EQ overlay display
+        m_eqOverlayActive = true;
+        m_eqOverlayStart = xTaskGetTickCount();
+        
+        // Temporarily boost brightness if very low
+        if (m_brightness < 10 && !m_volumeBrightnessOverride) {
+            m_volumeBrightnessOverride = true;
+            m_brightnessBeforeVolume = m_brightness;
+            m_driver.setBrightness(10);
+        }
+    }
+    
+    // Check if EQ overlay should be shown
+    bool isEqOverlayActive() const {
+        if (!m_eqOverlayActive) return false;
+        TickType_t elapsed = xTaskGetTickCount() - m_eqOverlayStart;
+        return elapsed < pdMS_TO_TICKS(VOLUME_OVERLAY_DURATION_MS);
+    }
+    
+    // Get EQ overlay fade factor
+    float getEqOverlayFade() const {
+        if (!m_eqOverlayActive) return 0.0f;
+        TickType_t elapsed = xTaskGetTickCount() - m_eqOverlayStart;
+        uint32_t elapsedMs = pdTICKS_TO_MS(elapsed);
+        
+        if (elapsedMs >= VOLUME_OVERLAY_DURATION_MS) return 0.0f;
+        if (elapsedMs < VOLUME_OVERLAY_HOLD_MS) return 1.0f;
+        
+        uint32_t fadeElapsed = elapsedMs - VOLUME_OVERLAY_HOLD_MS;
+        uint32_t fadeDuration = VOLUME_OVERLAY_DURATION_MS - VOLUME_OVERLAY_HOLD_MS;
+        return 1.0f - (float)fadeElapsed / (float)fadeDuration;
+    }
+    
+    // Render EQ overlay - shows 3 vertical bars for bass/mid/treble
+    void renderEqOverlay() {
+        if (!m_initialized) return;
+        
+        float fade = getEqOverlayFade();
+        if (fade <= 0.0f) {
+            m_eqOverlayActive = false;
+            if (m_volumeBrightnessOverride && !isVolumeOverlayActive()) {
+                m_volumeBrightnessOverride = false;
+                m_driver.setBrightness(m_brightnessBeforeVolume);
+            }
+            return;
+        }
+        
+        m_driver.clear();
+        
+        // EQ range: -12 to +12 dB, map to 0-16 rows (center = 8)
+        auto mapEqToRows = [](int8_t val) -> int {
+            // Map -12..+12 to 0..16 rows (center at 8)
+            return 8 + (val * 8 / 12);
+        };
+        
+        int bassRows = mapEqToRows(m_eqBass);
+        int midRows = mapEqToRows(m_eqMid);
+        int trebleRows = mapEqToRows(m_eqTreble);
+        
+        uint8_t effectiveBrightness = (m_brightness < 10) ? 10 : m_brightness;
+        
+        // Colors for each EQ band
+        RGB_SPI bassColor = {(uint8_t)(255 * fade), 0, 0};                           // Red
+        RGB_SPI midColor = {0, 0, (uint8_t)(255 * fade)};                            // Blue  
+        RGB_SPI trebleColor = {(uint8_t)(255 * fade), (uint8_t)(255 * fade), 0};     // Yellow
+        
+        // Draw 3 bars side by side (each 4 pixels wide, 2 pixel gaps)
+        // Bass: cols 0-3, Mid: cols 6-9, Treble: cols 12-15
+        auto drawBar = [&](int startCol, int rows, RGB_SPI color, bool highlight) {
+            int centerRow = 8;  // Center line
+            int barWidth = 4;
+            
+            // Draw from center up or down based on value
+            if (rows >= centerRow) {
+                // Positive: draw from center upward
+                for (int row = centerRow; row < rows && row < LED_MATRIX_HEIGHT; row++) {
+                    int displayRow = LED_MATRIX_HEIGHT - 1 - row;
+                    for (int col = startCol; col < startCol + barWidth && col < LED_MATRIX_WIDTH; col++) {
+                        RGB_SPI c = color;
+                        if (highlight) {
+                            c.r = (uint8_t)(c.r * 1.0f);
+                            c.g = (uint8_t)(c.g * 1.0f);
+                            c.b = (uint8_t)(c.b * 1.0f);
+                        }
+                        m_driver.setPixelXY(col, displayRow, c);
+                    }
+                }
+            } else {
+                // Negative: draw from center downward
+                for (int row = rows; row < centerRow; row++) {
+                    int displayRow = LED_MATRIX_HEIGHT - 1 - row;
+                    for (int col = startCol; col < startCol + barWidth && col < LED_MATRIX_WIDTH; col++) {
+                        RGB_SPI c = {(uint8_t)(color.r * 0.5f), (uint8_t)(color.g * 0.5f), (uint8_t)(color.b * 0.5f)};  // Dimmer for negative
+                        m_driver.setPixelXY(col, displayRow, c);
+                    }
+                }
+            }
+            
+            // Draw center line marker (dim white)
+            int displayCenterRow = LED_MATRIX_HEIGHT - 1 - centerRow;
+            for (int col = startCol; col < startCol + barWidth && col < LED_MATRIX_WIDTH; col++) {
+                RGB_SPI marker = {(uint8_t)(40 * fade), (uint8_t)(40 * fade), (uint8_t)(40 * fade)};
+                m_driver.setPixelXY(col, displayCenterRow, marker);
+            }
+        };
+        
+        // Draw the 3 bars
+        drawBar(1, bassRows, bassColor, m_eqType == 0);      // Bass on left
+        drawBar(6, midRows, midColor, m_eqType == 1);        // Mid in center
+        drawBar(11, trebleRows, trebleColor, m_eqType == 2); // Treble on right
+        
+        m_driver.setBrightness(effectiveBrightness);
+        m_driver.show();
+        m_driver.setBrightness(m_brightness);
+    }
+    
+    // -----------------------------------------------------------
+    // Pairing Mode Animation - slow blue pulsing
+    // -----------------------------------------------------------
+    void setPairingMode(bool active) {
+        m_pairingModeActive = active;
+        m_pairingModeStart = xTaskGetTickCount();
+        if (active) {
+            ESP_LOGI(LED_TAG, "Pairing mode LED animation started");
+        } else {
+            ESP_LOGI(LED_TAG, "Pairing mode LED animation stopped");
+        }
+    }
+    
+    bool isPairingModeActive() const { return m_pairingModeActive; }
+    
+    // Called when pairing succeeds - show 2 fast pulses then exit pairing mode
+    void showPairingSuccess() {
+        m_pairingSuccessActive = true;
+        m_pairingSuccessStart = xTaskGetTickCount();
+        m_pairingModeActive = false;  // Exit pairing mode after success animation
+        ESP_LOGI(LED_TAG, "Pairing success animation started");
+    }
+    
+    bool isPairingSuccessActive() const {
+        if (!m_pairingSuccessActive) return false;
+        TickType_t elapsed = xTaskGetTickCount() - m_pairingSuccessStart;
+        return elapsed < pdMS_TO_TICKS(PAIRING_SUCCESS_DURATION_MS);
+    }
+    
+    // Render pairing mode animation - slow blue pulsing
+    void renderPairingMode() {
+        if (!m_initialized) return;
+        
+        // Calculate pulse phase (0-1, repeating every PAIRING_PULSE_PERIOD_MS)
+        TickType_t elapsed = xTaskGetTickCount() - m_pairingModeStart;
+        uint32_t elapsedMs = pdTICKS_TO_MS(elapsed);
+        float phase = (float)(elapsedMs % PAIRING_PULSE_PERIOD_MS) / (float)PAIRING_PULSE_PERIOD_MS;
+        
+        // Sine wave for smooth pulsing (0.2 to 1.0 range for visibility)
+        float sineVal = sinf(phase * 2.0f * M_PI);
+        float brightness = 0.2f + 0.8f * (0.5f + 0.5f * sineVal);
+        
+        // Blue color with pulsing brightness
+        uint8_t b = (uint8_t)(255 * brightness);
+        uint8_t g = (uint8_t)(30 * brightness);  // Slight teal tint
+        RGB_SPI blueColor = {0, g, b};
+        
+        // Fill entire matrix with pulsing blue
+        m_driver.clear();
+        int totalLeds = LED_MATRIX_WIDTH * LED_MATRIX_HEIGHT;
+        for (int i = 0; i < totalLeds; i++) {
+            m_driver.setPixel(i, blueColor);
+        }
+        
+        // Use a reasonable brightness for pairing mode
+        uint8_t effectiveBrightness = (m_brightness > 0) ? m_brightness : 40;
+        m_driver.setBrightness(effectiveBrightness);
+        m_driver.show();
+        m_driver.setBrightness(m_brightness);
+    }
+    
+    // Render pairing success animation - 2 fast blue pulses
+    void renderPairingSuccess() {
+        if (!m_initialized) return;
+        
+        TickType_t elapsed = xTaskGetTickCount() - m_pairingSuccessStart;
+        uint32_t elapsedMs = pdTICKS_TO_MS(elapsed);
+        
+        if (elapsedMs >= PAIRING_SUCCESS_DURATION_MS) {
+            m_pairingSuccessActive = false;
+            return;
+        }
+        
+        // 2 fast pulses: on-off-on-off pattern
+        // Each pulse: 150ms on, 100ms off = 250ms per pulse, 500ms total
+        float brightness = 0.0f;
+        if (elapsedMs < 150) {
+            brightness = 1.0f;  // First pulse ON
+        } else if (elapsedMs < 250) {
+            brightness = 0.0f;  // First pulse OFF
+        } else if (elapsedMs < 400) {
+            brightness = 1.0f;  // Second pulse ON
+        } else {
+            brightness = 0.0f;  // Second pulse OFF
+        }
+        
+        // Bright blue/cyan for success
+        uint8_t b = (uint8_t)(255 * brightness);
+        uint8_t g = (uint8_t)(200 * brightness);
+        RGB_SPI successColor = {0, g, b};
+        
+        m_driver.clear();
+        int totalLeds = LED_MATRIX_WIDTH * LED_MATRIX_HEIGHT;
+        for (int i = 0; i < totalLeds; i++) {
+            m_driver.setPixel(i, successColor);
+        }
+        
+        uint8_t effectiveBrightness = (m_brightness > 0) ? m_brightness : 60;
+        m_driver.setBrightness(effectiveBrightness);
+        m_driver.show();
+        m_driver.setBrightness(m_brightness);
+    }
     
     // Check if volume overlay should be shown
     bool isVolumeOverlayActive() const {
@@ -689,6 +917,22 @@ private:
     // Temporary brightness override for volume overlay when user brightness is 0
     bool m_volumeBrightnessOverride = false;
     uint8_t m_brightnessBeforeVolume = 0;
+    
+    // EQ overlay display (same timing as volume)
+    bool m_eqOverlayActive = false;
+    TickType_t m_eqOverlayStart = 0;
+    int8_t m_eqBass = 0;
+    int8_t m_eqMid = 0;
+    int8_t m_eqTreble = 0;
+    uint8_t m_eqType = 0;  // 0=bass, 1=mid, 2=treble
+    
+    // Pairing mode animation
+    static constexpr uint32_t PAIRING_PULSE_PERIOD_MS = 2000;     // 2 seconds per pulse cycle
+    static constexpr uint32_t PAIRING_SUCCESS_DURATION_MS = 500;  // 500ms for 2 fast pulses
+    bool m_pairingModeActive = false;
+    TickType_t m_pairingModeStart = 0;
+    bool m_pairingSuccessActive = false;
+    TickType_t m_pairingSuccessStart = 0;
 };
 
 // -----------------------------------------------------------
@@ -905,9 +1149,30 @@ static void ledTask(void* param) {
             continue;
         }
         
+        // Check if pairing success animation should be shown (highest priority after OTA)
+        if (controller.isPairingSuccessActive()) {
+            controller.renderPairingSuccess();
+            vTaskDelayUntil(&lastWake, frameDelay);
+            continue;
+        }
+        
+        // Check if pairing mode animation should be shown
+        if (controller.isPairingModeActive()) {
+            controller.renderPairingMode();
+            vTaskDelayUntil(&lastWake, frameDelay);
+            continue;
+        }
+        
         // Check if volume overlay should be shown (takes priority)
         if (controller.isVolumeOverlayActive()) {
             controller.renderVolumeOverlay();
+            vTaskDelayUntil(&lastWake, frameDelay);
+            continue;
+        }
+        
+        // Check if EQ overlay should be shown
+        if (controller.isEqOverlayActive()) {
+            controller.renderEqOverlay();
             vTaskDelayUntil(&lastWake, frameDelay);
             continue;
         }
