@@ -271,14 +271,19 @@ public:
             int32_t delta = newPos - m_lastPos[ENC_VOLUME];
             m_lastPos[ENC_VOLUME] = newPos;
             
-            if (delta != 0) {
-                int newVol = (int)m_volume + (delta * VOLUME_STEP);
+            // Accumulate position changes
+            m_accumulator[ENC_VOLUME] += delta;
+            int32_t steps = m_accumulator[ENC_VOLUME] / ENCODER_STEP_THRESHOLD;
+            if (steps != 0) {
+                m_accumulator[ENC_VOLUME] %= ENCODER_STEP_THRESHOLD;
+                
+                int newVol = (int)m_volume + (steps * VOLUME_STEP);
                 if (newVol < VOLUME_MIN) newVol = VOLUME_MIN;
                 if (newVol > VOLUME_MAX) newVol = VOLUME_MAX;
                 m_volume = (uint8_t)newVol;
                 
                 if (m_volumeCb) m_volumeCb(m_volume);
-                ESP_LOGI(ENC_TAG, "Volume: %d (pos: %ld)", m_volume, (long)newPos);
+                ESP_LOGI(ENC_TAG, "Volume: %d (steps: %ld)", m_volume, (long)steps);
             }
         }
         
@@ -288,22 +293,27 @@ public:
             int32_t delta = newPos - m_lastPos[ENC_BASS];
             m_lastPos[ENC_BASS] = newPos;
             
-            if (delta != 0) {
+            // Accumulate position changes
+            m_accumulator[ENC_BASS] += delta;
+            int32_t steps = m_accumulator[ENC_BASS] / ENCODER_STEP_THRESHOLD;
+            if (steps != 0) {
+                m_accumulator[ENC_BASS] %= ENCODER_STEP_THRESHOLD;
+                
                 if (m_brightnessMode) {
                     // Brightness adjustment mode
-                    int newBright = (int)m_brightness + (delta * BRIGHTNESS_STEP);
+                    int newBright = (int)m_brightness + (steps * BRIGHTNESS_STEP);
                     if (newBright < BRIGHTNESS_MIN) newBright = BRIGHTNESS_MIN;
                     if (newBright > BRIGHTNESS_MAX) newBright = BRIGHTNESS_MAX;
                     m_brightness = (uint8_t)newBright;
                     
                     // Immediate feedback - notify brightness change while adjusting
                     if (m_brightnessCb) m_brightnessCb(m_brightness);
-                    ESP_LOGI(ENC_TAG, "Brightness: %d (pos: %ld)", m_brightness, (long)newPos);
+                    ESP_LOGI(ENC_TAG, "Brightness: %d (steps: %ld)", m_brightness, (long)steps);
                 } else {
                     // Normal bass EQ mode
-                    m_bass = clampEq(m_bass + delta * EQ_STEP);
+                    m_bass = clampEq(m_bass + steps * EQ_STEP);
                     eqChanged = true;
-                    ESP_LOGI(ENC_TAG, "Bass: %d (pos: %ld)", m_bass, (long)newPos);
+                    ESP_LOGI(ENC_TAG, "Bass: %d (steps: %ld)", m_bass, (long)steps);
                 }
             }
         }
@@ -314,10 +324,15 @@ public:
             int32_t delta = newPos - m_lastPos[ENC_MID];
             m_lastPos[ENC_MID] = newPos;
             
-            if (delta != 0) {
-                m_mid = clampEq(m_mid + delta * EQ_STEP);
+            // Accumulate position changes
+            m_accumulator[ENC_MID] += delta;
+            int32_t steps = m_accumulator[ENC_MID] / ENCODER_STEP_THRESHOLD;
+            if (steps != 0) {
+                m_accumulator[ENC_MID] %= ENCODER_STEP_THRESHOLD;
+                
+                m_mid = clampEq(m_mid + steps * EQ_STEP);
                 eqChanged = true;
-                ESP_LOGI(ENC_TAG, "Mid: %d (pos: %ld)", m_mid, (long)newPos);
+                ESP_LOGI(ENC_TAG, "Mid: %d (steps: %ld)", m_mid, (long)steps);
             }
         }
         
@@ -327,23 +342,28 @@ public:
             int32_t delta = newPos - m_lastPos[ENC_TREBLE];
             m_lastPos[ENC_TREBLE] = newPos;
             
-            if (delta != 0) {
+            // Accumulate position changes
+            m_accumulator[ENC_TREBLE] += delta;
+            int32_t steps = m_accumulator[ENC_TREBLE] / ENCODER_STEP_THRESHOLD;
+            if (steps != 0) {
+                m_accumulator[ENC_TREBLE] %= ENCODER_STEP_THRESHOLD;
+                
                 if (m_effectMode) {
                     // Effect selection mode - cycle through effects
-                    int newEffect = m_previewEffectId + delta;
+                    int newEffect = m_previewEffectId + steps;
                     // Wrap around
-                    if (newEffect < 0) newEffect = m_maxEffect - 1;
-                    if (newEffect >= m_maxEffect) newEffect = 0;
+                    while (newEffect < 0) newEffect += m_maxEffect;
+                    while (newEffect >= m_maxEffect) newEffect -= m_maxEffect;
                     m_previewEffectId = newEffect;
                     
                     // Notify effect change (preview, not confirmed)
                     if (m_effectCb) m_effectCb(m_previewEffectId, false);
-                    ESP_LOGI(ENC_TAG, "Effect preview: %d (pos: %ld)", m_previewEffectId, (long)newPos);
+                    ESP_LOGI(ENC_TAG, "Effect preview: %d (steps: %ld)", m_previewEffectId, (long)steps);
                 } else {
                     // Normal treble EQ mode
-                    m_treble = clampEq(m_treble + delta * EQ_STEP);
+                    m_treble = clampEq(m_treble + steps * EQ_STEP);
                     eqChanged = true;
-                    ESP_LOGI(ENC_TAG, "Treble: %d (pos: %ld)", m_treble, (long)newPos);
+                    ESP_LOGI(ENC_TAG, "Treble: %d (steps: %ld)", m_treble, (long)steps);
                 }
             }
         }
@@ -375,6 +395,10 @@ private:
     
     // Last positions (like Arduino enc_positions[4])
     int32_t m_lastPos[4] = {0, 0, 0, 0};
+    
+    // Encoder step accumulator - accumulate position changes before registering a turn
+    int32_t m_accumulator[4] = {0, 0, 0, 0};
+    static constexpr int32_t ENCODER_STEP_THRESHOLD = 4;  // Require 4 position changes per turn
     
     // Last button states
     bool m_lastBtnState[4] = {false, false, false, false};

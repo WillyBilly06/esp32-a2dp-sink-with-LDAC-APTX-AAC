@@ -474,6 +474,7 @@ private:
             addCharacteristic(m_controlServiceHandle, m_uuidOtaCtrlChar,
                              ESP_GATT_PERM_WRITE,
                              ESP_GATT_CHAR_PROP_BIT_WRITE | ESP_GATT_CHAR_PROP_BIT_NOTIFY);
+            // OTA Data supports both WRITE (with ACK) and WRITE_NR (fast) for batched transfers
             addCharacteristic(m_controlServiceHandle, m_uuidOtaDataChar,
                              ESP_GATT_PERM_WRITE,
                              ESP_GATT_CHAR_PROP_BIT_WRITE | ESP_GATT_CHAR_PROP_BIT_WRITE_NR);
