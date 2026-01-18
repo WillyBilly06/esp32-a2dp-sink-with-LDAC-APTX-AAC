@@ -161,6 +161,26 @@ public:
         return true;
     }
 
+    // Load sound muted state from NVS
+    bool loadSoundMuted() {
+        nvs_handle_t h;
+        if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return false;
+        uint8_t muted = 0;
+        nvs_get_u8(h, "sound_muted", &muted);
+        nvs_close(h);
+        return muted != 0;
+    }
+
+    // Save sound muted state to NVS
+    bool saveSoundMuted(bool muted) {
+        nvs_handle_t h;
+        if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return false;
+        nvs_set_u8(h, "sound_muted", muted ? 1 : 0);
+        nvs_commit(h);
+        nvs_close(h);
+        return true;
+    }
+
 private:
     static constexpr const char* TAG = "NVS";
     Settings m_settings;

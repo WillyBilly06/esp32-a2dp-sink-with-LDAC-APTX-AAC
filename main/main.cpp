@@ -11,6 +11,7 @@
 #include "nvs_flash.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
+#include "esp_partition.h"
 #include "esp_bt_device.h"
 #include "BluetoothA2DPSink.h"
 
@@ -20,8 +21,14 @@
 #include "storage/nvs_settings.h"
 #include "audio/i2s_output.h"
 #include "audio/audio_pipeline.h"
+#include "audio/sound_player.h"
 #include "ble/ble_gatt.h"
 #include "idf_update.h"
+
+// SPIFFS for sound storage
+#include "esp_spiffs.h"
+#include <sys/stat.h>
+#include <string.h>  // for strerror
 
 // LED Matrix support
 #ifdef CONFIG_LED_MATRIX_ENABLE
@@ -46,12 +53,38 @@ static BleGattService  g_ble;
 static BluetoothA2DPSink g_a2dp;
 static IdfUpdate       g_update;
 
+// Sound player reference (singleton)
+#define g_sound SoundPlayer::getInstance()
+
+// Sound upload state
+static volatile bool     g_soundUploadActive = false;
+static volatile SoundType g_soundUploadType = SOUND_STARTUP;
+static volatile uint32_t g_soundUploadSize = 0;
+static volatile uint32_t g_soundUploadReceived = 0;
+static uint8_t*          g_soundUploadBuf = nullptr;
+
 // Audio state
 static volatile uint8_t  g_bitsPerSample = 16;
 static volatile uint8_t  g_channels = 2;
 static volatile uint32_t g_sampleRate = APP_I2S_DEFAULT_SAMPLE_RATE;
 static volatile bool     g_otaActive = false;
 static volatile int64_t  g_otaCheckPassedTime = 0;  // Timestamp when CHECK passed (0 = not passed)
+
+// Pairing mode coordination flag - prevents disconnect callback from clearing pairing mode
+static volatile bool     g_pairingModeActive = false;  // True while in pairing mode (discoverable)
+
+// Codec switch detection - to suppress connected sound during rapid codec changes
+static volatile int64_t  g_lastDisconnectTime = 0;     // Timestamp of last disconnect (esp_timer_get_time)
+static const int64_t     CODEC_SWITCH_TIMEOUT_US = 5000000;  // 5 seconds - if reconnect within this, skip connected sound
+
+// Connected sound delay - wait for codec to stabilize before playing
+static volatile int64_t  g_lastCodecConfigTime = 0;    // Timestamp of last codec config
+static volatile bool     g_connectedSoundPending = false;  // True if waiting to play connected sound
+static const int64_t     CODEC_STABLE_DELAY_US = 400000;   // 400ms - wait this long after last codec config
+
+// Connection timestamp - to ignore initial volume report from phone
+static volatile int64_t  g_lastConnectTime = 0;        // Timestamp of last A2DP connection
+static const int64_t     VOLUME_GRACE_PERIOD_US = 2000000;  // 2 seconds - ignore volume changes after connection
 
 // Beat detection state
 static float smooth30_dB = -60.0f;
@@ -169,21 +202,36 @@ static void onEncoderPairingMode() {
     // If connected, disconnect first
     esp_a2d_connection_state_t state = g_a2dp.get_connection_state();
     
+    // Set pairing mode flag - prevents disconnect callback from interfering
+    g_pairingModeActive = true;
+    
     if (state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
         ESP_LOGI(TAG, "Disconnecting current device to enter pairing mode...");
         g_a2dp.disconnect();
         vTaskDelay(pdMS_TO_TICKS(500));  // Wait for disconnect
     }
     
+    // Reset I2S to default sample rate for sound playback
+    g_sampleRate = APP_I2S_DEFAULT_SAMPLE_RATE;
+    g_i2s.updateClock(APP_I2S_DEFAULT_SAMPLE_RATE);
+    g_dsp.setSampleRate(APP_I2S_DEFAULT_SAMPLE_RATE);
+    
     // Enable discoverable mode for new device pairing
     // ESP_BT_GENERAL_DISCOVERABLE = visible to all devices for pairing
     ESP_LOGI(TAG, "Entering pairing mode - device is now discoverable");
     g_a2dp.set_discoverability(ESP_BT_GENERAL_DISCOVERABLE);
     
+    // Play pairing sound (exclusive mode - no A2DP during pairing anyway)
+    // Use actual I2S sample rate to ensure proper resampling
+    g_sound.play(SOUND_PAIRING, g_i2s.getSampleRate(), SOUND_MODE_EXCLUSIVE);
+    
     // Start pairing mode LED animation (slow blue pulsing)
     #ifdef CONFIG_LED_MATRIX_ENABLE
     LedController::getInstance().setPairingMode(true);
     #endif
+    
+    // NOTE: g_pairingModeActive stays true until a device connects
+    // This prevents the disconnect callback from resetting discoverability or LED animation
 }
 
 static void onEncoderEffectChange(int effectId, bool confirmed) {
@@ -551,6 +599,339 @@ static void onBleOtaData(const uint8_t* data, size_t len) {
 }
 
 // -----------------------------------------------------------
+// Sound upload callbacks
+// -----------------------------------------------------------
+// Control protocol (matching Android app):
+//   CMD [0x00, value] = Set mute (value: 0=unmute, 1=mute)
+//   CMD [0x01, type]  = Delete sound (type: 0=startup, 1=pairing, 2=connected, 3=maxvol)
+//   CMD [0x02]        = Request status (reply: status byte)
+// 
+// Upload protocol (on SoundData characteristic):
+//   START: [0x01][soundType][size(4)][reserved(4)] -> ACK: 0xA1
+//   DATA:  [0x02][seq(2)][len(2)][payload...]      -> ACK: 0xA2
+//   END:   [0x03]                                  -> ACK: 0xA3
+//   ERROR responses: 0xE0+code
+// NOTE: ACKs use 0xAx to avoid conflict with muted status (0x80-0x8F)
+
+// Sound upload state
+static volatile uint16_t g_soundUploadExpectedSeq = 0;
+static TaskHandle_t g_soundSaveTaskHandle = nullptr;
+static volatile uint8_t g_soundSaveResult = 0;  // 0=pending, 0xA3=success, 0xE4+=error
+
+// Forward declaration
+static void notifySoundAck(uint8_t code);
+
+// Task to save sound file (deferred from BLE callback to avoid crash)
+static void soundSaveTask(void* param) {
+    uint8_t result = 0xE5;  // Default: no data error
+    
+    // Copy volatile values to local
+    uint8_t* buf = g_soundUploadBuf;
+    uint32_t size = g_soundUploadReceived;
+    SoundType type = g_soundUploadType;
+    
+    ESP_LOGI(TAG, "Sound save task started: type=%d, size=%u, buf=%p", 
+             type, (unsigned)size, buf);
+    
+    if (!buf || size == 0) {
+        ESP_LOGE(TAG, "Sound save task: no data");
+        goto notify_and_cleanup;
+    }
+    
+    // Validate WAV header minimally
+    if (size < 44) {
+        ESP_LOGE(TAG, "Sound save task: data too small for WAV");
+        result = 0xE8;
+        goto notify_and_cleanup;
+    }
+    
+    // Yield to let BLE stack finish
+    vTaskDelay(pdMS_TO_TICKS(100));
+    
+    ESP_LOGI(TAG, "Sound save task: writing to SPIFFS...");
+    
+    // Check if SPIFFS is mounted
+    {
+        size_t total = 0, used = 0;
+        esp_err_t spiffs_err = esp_spiffs_info("spiffs", &total, &used);
+        if (spiffs_err != ESP_OK) {
+            ESP_LOGE(TAG, "SPIFFS not mounted! Error: %s", esp_err_to_name(spiffs_err));
+            result = 0xE5;  // SPIFFS error
+            goto notify_and_cleanup;
+        }
+        ESP_LOGI(TAG, "SPIFFS check: %u KB total, %u KB used, need %u KB", 
+                 (unsigned)(total / 1024), (unsigned)(used / 1024), (unsigned)(size / 1024));
+        
+        // Check if enough space
+        if (used + size > total) {
+            ESP_LOGE(TAG, "SPIFFS full! Need %u bytes, have %u free", 
+                     (unsigned)size, (unsigned)(total - used));
+            result = 0xE6;  // No space
+            goto notify_and_cleanup;
+        }
+    }
+    
+    // Write file in chunks to avoid watchdog issues
+    {
+        // Use path from SOUND_PATHS array for consistency
+        if (type >= SOUND_TYPE_COUNT) {
+            ESP_LOGE(TAG, "Invalid sound type: %d", type);
+            result = 0xE9;
+            goto notify_and_cleanup;
+        }
+        const char* path = SOUND_PATHS[type];
+        ESP_LOGI(TAG, "Sound save: type=%d, path=%s, size=%u", type, path, (unsigned)size);
+        
+        // Try to delete existing file first
+        struct stat st;
+        if (stat(path, &st) == 0) {
+            ESP_LOGI(TAG, "Deleting existing file: %s (%ld bytes)", path, st.st_size);
+            remove(path);
+        }
+        
+        FILE* f = fopen(path, "wb");
+        if (!f) {
+            ESP_LOGE(TAG, "Failed to open file: %s (errno=%d: %s)", path, errno, strerror(errno));
+            result = 0xE4;
+            goto notify_and_cleanup;
+        }
+        
+        // Write in 4KB chunks
+        const size_t WRITE_CHUNK = 4096;
+        size_t written = 0;
+        while (written < size) {
+            size_t toWrite = (size - written > WRITE_CHUNK) ? WRITE_CHUNK : (size - written);
+            size_t w = fwrite(buf + written, 1, toWrite, f);
+            if (w != toWrite) {
+                ESP_LOGE(TAG, "Write error at offset %u", (unsigned)written);
+                fclose(f);
+                remove(path);
+                result = 0xE4;
+                goto notify_and_cleanup;
+            }
+            written += w;
+            
+            // Yield periodically to prevent watchdog
+            if ((written % (16 * 1024)) == 0) {
+                vTaskDelay(pdMS_TO_TICKS(1));
+            }
+        }
+        
+        fclose(f);
+        ESP_LOGI(TAG, "Sound saved successfully: %s (%u bytes)", path, (unsigned)size);
+        
+        // Update sound player status
+        g_sound.refreshStatus();
+        
+        result = 0xA3;  // Success
+    }
+    
+notify_and_cleanup:
+    // Free the upload buffer
+    if (buf) {
+        heap_caps_free(buf);
+    }
+    g_soundUploadBuf = nullptr;
+    g_soundUploadActive = false;
+    g_soundUploadSize = 0;
+    g_soundUploadReceived = 0;
+    
+    // Delay before sending notification to let things settle
+    vTaskDelay(pdMS_TO_TICKS(50));
+    
+    // Send result notification
+    ESP_LOGI(TAG, "Sound save complete, sending ACK: 0x%02X", result);
+    g_ble.notifySoundStatus(result);
+    
+    // Send updated status
+    vTaskDelay(pdMS_TO_TICKS(100));
+    g_ble.notifySoundStatus(g_sound.getStatus());
+    
+    g_soundSaveTaskHandle = nullptr;
+    vTaskDelete(NULL);
+}
+
+static void notifySoundAck(uint8_t code) {
+    uint8_t ack[1] = { code };
+    g_ble.notifySoundStatus(ack[0]);
+}
+
+static void notifySoundAckSeq(uint8_t code, uint16_t seq) {
+    // For DATA ACK, we need to send [0x82][seq_lo][seq_hi]
+    // But notifySoundStatus only sends 1 byte, so we need a different approach
+    // For now, just send 0x82 and rely on sequential processing
+    g_ble.notifySoundStatus(code);
+}
+
+static void onBleSoundCtrl(const uint8_t* data, size_t len) {
+    if (len < 1) return;
+    uint8_t cmd = data[0];
+    
+    ESP_LOGI(TAG, "SOUND CTRL: cmd=0x%02X, len=%u", cmd, (unsigned)len);
+    
+    // Set mute [0x00, value]
+    if (cmd == 0x00 && len >= 2) {
+        bool mute = (data[1] != 0);
+        g_sound.setMuted(mute);
+        g_settings.saveSoundMuted(g_sound.isMuted());
+        g_ble.notifySoundStatus(g_sound.getStatus());
+        ESP_LOGI(TAG, "Sound mute set: %s", mute ? "MUTED" : "UNMUTED");
+        return;
+    }
+    
+    // Delete sound [0x01, type]
+    if (cmd == 0x01 && len >= 2) {
+        SoundType type = (SoundType)(data[1] & 0x03);
+        if (type <= SOUND_MAX_VOLUME) {
+            g_sound.deleteSound(type);
+            g_ble.notifySoundStatus(g_sound.getStatus());
+            ESP_LOGI(TAG, "Sound deleted: type=%d", type);
+        }
+        return;
+    }
+    
+    // Request status [0x02]
+    if (cmd == 0x02) {
+        g_ble.notifySoundStatus(g_sound.getStatus());
+        return;
+    }
+}
+
+static void onBleSoundData(const uint8_t* data, size_t len) {
+    if (len < 1) return;
+    
+    uint8_t pktType = data[0];
+    ESP_LOGI(TAG, "Sound DATA packet: pktType=0x%02X, len=%d", pktType, (int)len);
+    ESP_LOG_BUFFER_HEX(TAG, data, len > 16 ? 16 : len);  // Dump first 16 bytes
+    
+    // START packet: [0x01][soundType][size(4)][reserved(4)]
+    if (pktType == 0x01 && len >= 6) {
+        uint8_t rawType = data[1];
+        SoundType type = (SoundType)(rawType & 0x03);
+        uint32_t size = data[2] | (data[3] << 8) | (data[4] << 16) | (data[5] << 24);
+        
+        ESP_LOGI(TAG, "Sound START parsed: raw_byte1=0x%02X, type=%d, size=%u", rawType, type, (unsigned)size);
+        
+        // Validate type - reject if raw value > 3 (indicates invalid value like -1/0xFF)
+        if (rawType > 3) {
+            ESP_LOGE(TAG, "Invalid sound type: 0x%02X (must be 0-3)", rawType);
+            notifySoundAck(0xE9);  // Error: invalid type
+            return;
+        }
+        
+        // Free previous buffer if any
+        if (g_soundUploadBuf) {
+            heap_caps_free(g_soundUploadBuf);
+            g_soundUploadBuf = nullptr;
+        }
+        
+        // Validate size (max 200KB)
+        if (size > 200 * 1024) {
+            ESP_LOGE(TAG, "Sound too large: %u bytes (max 200KB)", (unsigned)size);
+            notifySoundAck(0xE1);  // Error: too large
+            return;
+        }
+        
+        // Allocate buffer (use PSRAM if available, fallback to regular heap)
+        g_soundUploadBuf = (uint8_t*)heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!g_soundUploadBuf) {
+            g_soundUploadBuf = (uint8_t*)heap_caps_malloc(size, MALLOC_CAP_8BIT);
+        }
+        
+        if (!g_soundUploadBuf) {
+            ESP_LOGE(TAG, "Failed to allocate %u bytes", (unsigned)size);
+            notifySoundAck(0xE2);  // Error: no memory
+            return;
+        }
+        
+        g_soundUploadType = type;
+        g_soundUploadSize = size;
+        g_soundUploadReceived = 0;
+        g_soundUploadExpectedSeq = 0;
+        g_soundUploadActive = true;
+        
+        notifySoundAck(0xA1);  // START_OK (0xAx to avoid conflict with muted status)
+        ESP_LOGI(TAG, "Sound upload started, sent 0xA1");
+        return;
+    }
+    
+    // DATA packet: [0x02][seq(2)][len(2)][payload...]
+    if (pktType == 0x02 && len >= 5 && g_soundUploadActive && g_soundUploadBuf) {
+        uint16_t seq = data[1] | (data[2] << 8);
+        uint16_t payloadLen = data[3] | (data[4] << 8);
+        
+        if (len < 5 + payloadLen) {
+            ESP_LOGE(TAG, "DATA packet truncated: got %u, expected %u", (unsigned)len, (unsigned)(5 + payloadLen));
+            notifySoundAck(0xE3);  // Error: truncated
+            return;
+        }
+        
+        // Check sequence
+        if (seq != g_soundUploadExpectedSeq) {
+            ESP_LOGW(TAG, "Seq mismatch: got %u, expected %u", seq, g_soundUploadExpectedSeq);
+            // Still accept it if within buffer bounds
+        }
+        
+        // Copy data to buffer
+        uint32_t spaceLeft = g_soundUploadSize - g_soundUploadReceived;
+        uint16_t toCopy = (payloadLen <= spaceLeft) ? payloadLen : (uint16_t)spaceLeft;
+        
+        memcpy(g_soundUploadBuf + g_soundUploadReceived, data + 5, toCopy);
+        g_soundUploadReceived += toCopy;
+        g_soundUploadExpectedSeq = seq + 1;
+        
+        // Send ACK
+        notifySoundAck(0xA2);  // DATA_ACK (0xAx to avoid conflict with muted status)
+        
+        // Log progress every 10%
+        static uint8_t lastPct = 255;
+        uint8_t pct = (g_soundUploadSize > 0) ? (uint8_t)((uint64_t)g_soundUploadReceived * 100 / g_soundUploadSize) : 0;
+        if (pct / 10 != lastPct / 10) {
+            ESP_LOGI(TAG, "Sound upload: %u%% (%u/%u)", pct, (unsigned)g_soundUploadReceived, (unsigned)g_soundUploadSize);
+            lastPct = pct;
+        }
+        return;
+    }
+    
+    // END packet: [0x03]
+    if (pktType == 0x03) {
+        ESP_LOGI(TAG, "Sound END: received %u / %u bytes", 
+                 (unsigned)g_soundUploadReceived, (unsigned)g_soundUploadSize);
+        
+        if (g_soundUploadActive && g_soundUploadBuf && g_soundUploadReceived > 0) {
+            // Defer save to separate task to avoid crashing from BLE callback
+            // The task will send ACK and cleanup
+            if (g_soundSaveTaskHandle == nullptr) {
+                // Log available memory for debugging
+                ESP_LOGI(TAG, "Free heap: %u bytes, largest block: %u bytes",
+                         (unsigned)esp_get_free_heap_size(),
+                         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+                
+                // Use 8KB stack (reduced from 16KB) - file ops don't need that much
+                BaseType_t ret = xTaskCreate(soundSaveTask, "snd_save", 8192, nullptr, 3, &g_soundSaveTaskHandle);
+                if (ret != pdPASS) {
+                    ESP_LOGE(TAG, "Failed to create save task (ret=%d)", ret);
+                    notifySoundAck(0xE6);  // Error: task creation failed
+                    // Cleanup here since task won't run
+                    if (g_soundUploadBuf) {
+                        heap_caps_free(g_soundUploadBuf);
+                        g_soundUploadBuf = nullptr;
+                    }
+                    g_soundUploadActive = false;
+                }
+            } else {
+                ESP_LOGW(TAG, "Save task already running");
+                notifySoundAck(0xE7);  // Error: busy
+            }
+        } else {
+            notifySoundAck(0xE5);  // Error: no data
+            g_soundUploadActive = false;
+        }
+        return;
+    }
+}
+
+// -----------------------------------------------------------
 // A2DP callbacks
 // -----------------------------------------------------------
 
@@ -588,11 +969,23 @@ static void onCodecConfig(uint32_t rate, uint8_t bps, uint8_t channels) {
     
     ESP_LOGI(TAG, "========================================");
     
+    // Pause pipeline during codec reconfiguration to prevent race conditions
+    g_pipeline.clear();
+    
     g_sampleRate = rate;
     g_bitsPerSample = bps;
     g_channels = channels;
     g_i2s.updateClock(rate);
     g_dsp.setSampleRate(rate);
+    
+    // Mark that we need to play connected sound after codec stabilizes
+    g_lastCodecConfigTime = esp_timer_get_time();
+    g_connectedSoundPending = true;
+    
+    // Small delay to let I2S stabilize after clock change
+    vTaskDelay(pdMS_TO_TICKS(20));
+    
+    // Note: Connected sound is now played by buttonsTask after codec is stable
 }
 
 static void onStreamData(const uint8_t* data, uint32_t len) {
@@ -611,26 +1004,65 @@ static void onConnectionState(esp_a2d_connection_state_t state, void* user) {
     ESP_LOGI(TAG, ">>> A2DP Connection: %s", stateStr);
     
     if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
+        // Record disconnect time for codec switch detection
+        g_lastDisconnectTime = esp_timer_get_time();
+        
+        // Cancel any pending connected sound
+        g_connectedSoundPending = false;
+        
         ESP_LOGW(TAG, "A2DP disconnected - waiting for phone to reconnect with new codec...");
         g_pipeline.clear();
-        g_i2s.updateClock(APP_I2S_DEFAULT_SAMPLE_RATE);
-        g_dsp.setSampleRate(APP_I2S_DEFAULT_SAMPLE_RATE);
+        g_i2s.zeroDMA();  // Clear any stale audio data
         
-        // The library sets connectable=true on disconnect, but we want to stay non-discoverable
-        // Wait for library to finish, then disable discoverable mode again
-        vTaskDelay(pdMS_TO_TICKS(50));
-        g_a2dp.set_discoverability(ESP_BT_NON_DISCOVERABLE);
-        ESP_LOGI(TAG, "Discoverability disabled - press pairing button for new devices");
-        
-        // Stop pairing animation if running (user disconnected during pairing)
-        #ifdef CONFIG_LED_MATRIX_ENABLE
-        LedController::getInstance().setPairingMode(false);
-        #endif
+        // Only reset sample rate and discoverability if NOT in pairing mode
+        // (pairing mode handler sets these intentionally and they should persist)
+        if (!g_pairingModeActive) {
+            g_sampleRate = APP_I2S_DEFAULT_SAMPLE_RATE;  // Reset sample rate for sound effects
+            g_i2s.updateClock(APP_I2S_DEFAULT_SAMPLE_RATE);
+            g_dsp.setSampleRate(APP_I2S_DEFAULT_SAMPLE_RATE);
+            
+            // The library sets connectable=true on disconnect, but we want to stay non-discoverable
+            // Wait for library to finish, then disable discoverable mode again
+            vTaskDelay(pdMS_TO_TICKS(50));
+            g_a2dp.set_discoverability(ESP_BT_NON_DISCOVERABLE);
+            ESP_LOGI(TAG, "Discoverability disabled - press pairing button for new devices");
+            
+            // Stop pairing animation if running (only if not intentionally in pairing mode)
+            #ifdef CONFIG_LED_MATRIX_ENABLE
+            LedController::getInstance().setPairingMode(false);
+            #endif
+        } else {
+            ESP_LOGI(TAG, "In pairing mode - keeping discoverable and LED animation active");
+        }
     } else if (state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
-        ESP_LOGI(TAG, "A2DP connected - codec will be configured shortly...");
+        ESP_LOGI(TAG, "A2DP connected - codec should already be configured");
+        
+        // Record connection time - used to ignore initial volume report from phone
+        g_lastConnectTime = esp_timer_get_time();
+        
+        // Check if this is a rapid reconnect (codec switch) - don't play connected sound
+        int64_t timeSinceDisconnect = esp_timer_get_time() - g_lastDisconnectTime;
+        bool isCodecSwitch = (g_lastDisconnectTime > 0) && (timeSinceDisconnect < CODEC_SWITCH_TIMEOUT_US);
+        
+        if (isCodecSwitch) {
+            ESP_LOGI(TAG, "Codec switch detected (reconnect in %lld ms) - skipping connected sound", 
+                     timeSinceDisconnect / 1000);
+        }
+        
+        // Clear pairing mode flag - we're now connected
+        g_pairingModeActive = false;
+        
         // Disable discoverable mode once connected - only reconnect allowed
         g_a2dp.set_discoverability(ESP_BT_NON_DISCOVERABLE);
         ESP_LOGI(TAG, "Pairing mode disabled - device no longer discoverable");
+        
+        // Stop any playing sound (e.g., pairing sound)
+        if (g_sound.isPlaying()) {
+            g_sound.stop();
+        }
+        
+        // Connected sound is now played by buttonsTask after codec stabilizes
+        // (see g_connectedSoundPending flag set in onCodecConfig)
         
         // Show pairing success animation if we were in pairing mode
         #ifdef CONFIG_LED_MATRIX_ENABLE
@@ -700,6 +1132,26 @@ static void buttonsTask(void* arg) {
 
     while (true) {
         uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+        
+        // Check if connected sound is pending and codec has stabilized
+        if (g_connectedSoundPending) {
+            int64_t timeSinceCodecConfig = esp_timer_get_time() - g_lastCodecConfigTime;
+            if (timeSinceCodecConfig >= CODEC_STABLE_DELAY_US) {
+                g_connectedSoundPending = false;
+                
+                // Check if this is a codec switch (rapid reconnect) - don't play sound
+                int64_t timeSinceDisconnect = g_lastCodecConfigTime - g_lastDisconnectTime;
+                bool isCodecSwitch = (g_lastDisconnectTime > 0) && (timeSinceDisconnect < CODEC_SWITCH_TIMEOUT_US);
+                
+                if (isCodecSwitch) {
+                    ESP_LOGI(TAG, "Codec switch detected - skipping connected sound");
+                } else {
+                    ESP_LOGI(TAG, "Codec stable for %lld ms - playing connected sound at %u Hz",
+                             timeSinceCodecConfig / 1000, (unsigned)g_i2s.getSampleRate());
+                    g_sound.play(SOUND_CONNECTED, g_i2s.getSampleRate(), SOUND_MODE_EXCLUSIVE);
+                }
+            }
+        }
         
         bool r1 = gpio_get_level((gpio_num_t)APP_BUTTON1_GPIO);
         if (r1 != lastBtn1) debounce1 = now;
@@ -848,6 +1300,58 @@ static void beatTask(void* arg) {
 // app_main
 // -----------------------------------------------------------
 extern "C" void app_main(void) {
+    // ========================================================================
+    // RECOVERY BOOT CHECK - Must be done FIRST before anything else
+    // Hold Button 1 (GPIO 18) during boot to enter recovery mode
+    // ========================================================================
+    {
+        // Configure button GPIO as input with pullup (before NVS init for fastest check)
+        gpio_config_t btn_cfg = {};
+        btn_cfg.mode = GPIO_MODE_INPUT;
+        btn_cfg.pin_bit_mask = (1ULL << APP_BUTTON1_GPIO);
+        btn_cfg.pull_up_en = GPIO_PULLUP_ENABLE;
+        gpio_config(&btn_cfg);
+        
+        // Read button state (active low = pressed when 0)
+        bool buttonPressed = (gpio_get_level((gpio_num_t)APP_BUTTON1_GPIO) == 0);
+        
+        if (buttonPressed) {
+            ESP_LOGW(TAG, "Recovery button held - checking for recovery partition...");
+            
+            // Wait a moment to debounce and confirm intentional press
+            vTaskDelay(pdMS_TO_TICKS(500));
+            buttonPressed = (gpio_get_level((gpio_num_t)APP_BUTTON1_GPIO) == 0);
+            
+            if (buttonPressed) {
+                // Find recovery partition by label (uses "ota_2" subtype for bootloader compatibility)
+                const esp_partition_t* recovery = esp_partition_find_first(
+                    ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_2, "recovery");
+                
+                if (recovery) {
+                    ESP_LOGW(TAG, "Booting into RECOVERY MODE...");
+                    ESP_LOGW(TAG, "Recovery partition: %s @ 0x%lx, size=%lu",
+                             recovery->label, (unsigned long)recovery->address,
+                             (unsigned long)recovery->size);
+                    
+                    // Set boot partition to recovery and restart
+                    esp_err_t err = esp_ota_set_boot_partition(recovery);
+                    if (err == ESP_OK) {
+                        vTaskDelay(pdMS_TO_TICKS(100));
+                        esp_restart();
+                        // Should never reach here
+                    } else {
+                        ESP_LOGE(TAG, "Failed to set boot partition: %s", esp_err_to_name(err));
+                    }
+                } else {
+                    ESP_LOGW(TAG, "No recovery partition found - continuing normal boot");
+                }
+            }
+        }
+    }
+    // ========================================================================
+    // END RECOVERY BOOT CHECK - Continue with normal boot
+    // ========================================================================
+
     // NVS init
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -866,14 +1370,38 @@ extern "C" void app_main(void) {
         }
     }
 
+    // Initialize SPIFFS for sound storage
+    esp_vfs_spiffs_conf_t spiffsConf = {
+        .base_path = "/spiffs",
+        .partition_label = "spiffs",  // Must match partition table name
+        .max_files = 5,
+        .format_if_mount_failed = true
+    };
+    ret = esp_vfs_spiffs_register(&spiffsConf);
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "SPIFFS mounted");
+        size_t total = 0, used = 0;
+        esp_spiffs_info("spiffs", &total, &used);
+        ESP_LOGI(TAG, "SPIFFS: %u KB total, %u KB used", (unsigned)(total / 1024), (unsigned)(used / 1024));
+    } else {
+        ESP_LOGW(TAG, "SPIFFS mount failed: %s", esp_err_to_name(ret));
+    }
+
     // Load settings
     g_settings.load();
     bool bassBoost, channelFlip, bypass;
     int8_t eqBass, eqMid, eqTreble;
     std::string deviceName;
+    bool soundMuted;
     g_settings.getControl(bassBoost, channelFlip, bypass);
     g_settings.getEQ(eqBass, eqMid, eqTreble);
     g_settings.getDeviceName(deviceName);
+    soundMuted = g_settings.loadSoundMuted();
+
+    // Initialize sound player (sets muted state and scans SPIFFS for existing sounds)
+    g_sound.init(APP_I2S_DEFAULT_SAMPLE_RATE);
+    g_sound.setMuted(soundMuted);
+    ESP_LOGI(TAG, "Sound player initialized: muted=%d, status=0x%02X", soundMuted, g_sound.getStatus());
 
     // Initialize DSP
     g_dsp.setSampleRate(APP_I2S_DEFAULT_SAMPLE_RATE);
@@ -887,12 +1415,27 @@ extern "C" void app_main(void) {
         ESP_LOGE(TAG, "I2S init failed");
         return;
     }
+    
+    // Set up I2S sample rate change callback to notify SoundPlayer
+    g_i2s.setSampleRateCallback([](uint32_t newRate) {
+        g_sound.setTargetSampleRate(newRate);
+    });
+
+    // Set up sound player I2S write function (after I2S init)
+    g_sound.setI2SWriteFunc([](const uint8_t* data, size_t len) -> size_t {
+        return g_i2s.write(data, len);
+    });
 
     // Initialize audio pipeline
     if (!g_pipeline.init()) {
         ESP_LOGE(TAG, "Audio pipeline init failed");
         return;
     }
+    
+    // Set callback to skip I2S writes when exclusive sound is playing
+    g_pipeline.setSkipWriteCallback([]() -> bool {
+        return g_sound.isExclusivePlaying();
+    });
 
     // GPIO init (buttons + LED)
     gpio_config_t io = {};
@@ -908,16 +1451,71 @@ extern "C" void app_main(void) {
     gpio_config(&led);
     gpio_set_level((gpio_num_t)APP_BEAT_LED_GPIO, 0);
 
+    // ========================================================================
+    // STARTUP SEQUENCE: Play startup sound + LED animation BEFORE BLE/A2DP
+    // Both must complete before initializing anything else
+    // ========================================================================
+    
+    // Start LED matrix task first (needed for startup animation)
+    #ifdef CONFIG_LED_MATRIX_ENABLE
+    #if APP_HAS_PSRAM
+    startLedTask(&g_dsp, 3, 8192);  // 8KB stack - PSRAM available
+    #else
+    startLedTask(&g_dsp, 3, 4096);  // 4KB stack - no PSRAM, conserve memory
+    #endif
+    ESP_LOGI(TAG, "LED matrix started on GPIO %d", CONFIG_LED_MATRIX_GPIO);
+    
+    // Give LED task time to initialize before requesting animation
+    vTaskDelay(pdMS_TO_TICKS(100));
+    
+    // Start startup sound and LED animation together
+    bool hasStartupSound = g_sound.hasSound(SOUND_STARTUP);
+    if (hasStartupSound) {
+        ESP_LOGI(TAG, "Playing startup sound + animation...");
+        g_sound.play(SOUND_STARTUP, g_i2s.getSampleRate(), SOUND_MODE_EXCLUSIVE);
+    } else {
+        ESP_LOGI(TAG, "Playing startup animation (no sound)...");
+    }
+    LedController::getInstance().requestStartupAnimation();
+    
+    // Small delay to ensure animation starts (flag is set before playStartupAnimation runs)
+    vTaskDelay(pdMS_TO_TICKS(50));
+    
+    // Wait for BOTH sound AND LED animation to complete
+    while (g_sound.isPlaying() || LedController::getInstance().isStartupAnimationRunning()) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    ESP_LOGI(TAG, "Startup sequence complete - sound and LED animation finished");
+    
+    #else
+    // No LED matrix - just play startup sound and wait for completion
+    if (g_sound.hasSound(SOUND_STARTUP)) {
+        ESP_LOGI(TAG, "Playing startup sound...");
+        g_sound.play(SOUND_STARTUP, g_i2s.getSampleRate(), SOUND_MODE_EXCLUSIVE);
+        while (g_sound.isPlaying()) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        ESP_LOGI(TAG, "Startup sound complete");
+    }
+    #endif
+    // ========================================================================
+    // END STARTUP SEQUENCE - Now initialize BLE, A2DP, and other services
+    // ========================================================================
+
     // Initialize BLE
     #ifdef CONFIG_LED_MATRIX_ENABLE
-    g_ble.setCallbacks(onBleControl, onBleEq, onBleName, onBleOtaCtrl, onBleOtaData, onBleLedEffect, onBleLedSettings);
+    g_ble.setCallbacks(onBleControl, onBleEq, onBleName, onBleOtaCtrl, onBleOtaData, onBleLedEffect, onBleLedSettings, onBleSoundCtrl, onBleSoundData);
     uint8_t savedLedEffect = g_settings.loadLedEffect();
     uint8_t savedBrightness = LedController::getInstance().getBrightness();
     g_ble.init(deviceName.c_str(), APP_FW_VERSION, getControlByte(), eqBass, eqMid, eqTreble, savedLedEffect, savedBrightness);
     #else
-    g_ble.setCallbacks(onBleControl, onBleEq, onBleName, onBleOtaCtrl, onBleOtaData);
+    g_ble.setCallbacks(onBleControl, onBleEq, onBleName, onBleOtaCtrl, onBleOtaData, nullptr, nullptr, onBleSoundCtrl, onBleSoundData);
     g_ble.init(deviceName.c_str(), APP_FW_VERSION, getControlByte(), eqBass, eqMid, eqTreble);
     #endif
+    
+    // Initialize BLE sound status with current sound player status
+    // This ensures the correct status is sent when a client connects
+    g_ble.setSoundStatus(g_sound.getStatus());
 
     // Start A2DP
     g_a2dp.set_output_active(false);
@@ -938,6 +1536,21 @@ extern "C" void app_main(void) {
         EncoderController::getInstance().setCurrentVolume((uint8_t)volume);
         ESP_LOGI(TAG, "Phone volume changed to %d - encoder synced", volume);
         #endif
+        
+        // Skip max volume sound during connection grace period (ignore initial volume report)
+        int64_t timeSinceConnect = esp_timer_get_time() - g_lastConnectTime;
+        if (timeSinceConnect < VOLUME_GRACE_PERIOD_US) {
+            ESP_LOGI(TAG, "Ignoring volume report during connection grace period (%lld ms)", 
+                     timeSinceConnect / 1000);
+            return;
+        }
+        
+        // Play max volume sound when hitting maximum (127 for AVRCP)
+        // Uses exclusive mode - will interrupt A2DP audio briefly
+        if (volume >= 127 && g_sound.hasSound(SOUND_MAX_VOLUME)) {
+            ESP_LOGI(TAG, "Max volume reached - playing sound");
+            g_sound.play(SOUND_MAX_VOLUME, g_i2s.getSampleRate(), SOUND_MODE_EXCLUSIVE);
+        }
     });
     
     g_a2dp.start(deviceName.c_str());
@@ -961,17 +1574,6 @@ extern "C" void app_main(void) {
     xTaskCreatePinnedToCore(audioTxTask, "audio_tx", 8192, nullptr, configMAX_PRIORITIES - 2, nullptr, 1);
     xTaskCreate(buttonsTask, "buttons", 2048, nullptr, 5, nullptr);
     xTaskCreate(beatTask, "beat", 2048, nullptr, 4, nullptr);
-    
-    // Start LED matrix task
-    // Stack size: 8KB with PSRAM, 4KB without (RMT driver needs internal RAM stack)
-    #ifdef CONFIG_LED_MATRIX_ENABLE
-    #if APP_HAS_PSRAM
-    startLedTask(&g_dsp, 3, 8192);  // 8KB stack - PSRAM available
-    #else
-    startLedTask(&g_dsp, 3, 4096);  // 4KB stack - no PSRAM, conserve memory
-    #endif
-    ESP_LOGI(TAG, "LED matrix started on GPIO %d", CONFIG_LED_MATRIX_GPIO);
-    #endif
 
     // Initialize and start encoder task
     #ifdef CONFIG_ENCODER_ENABLE

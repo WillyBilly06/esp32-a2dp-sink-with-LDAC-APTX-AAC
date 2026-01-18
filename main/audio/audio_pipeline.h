@@ -24,6 +24,9 @@ struct AudioBuf {
     uint8_t data[APP_AUDIO_POOL_BUF_SIZE];
 };
 
+// Callback type for checking if I2S write should be skipped
+typedef bool (*ShouldSkipWriteCallback)();
+
 class AudioPipeline {
 public:
     AudioPipeline() 
@@ -35,6 +38,8 @@ public:
         , m_enqueueFail(0)
         , m_shortWriteCount(0)
         , m_lastProcessMs(0)
+        , m_skipWriteCallback(nullptr)
+        , m_wasSkipping(false)
     {
     }
 
@@ -111,6 +116,11 @@ public:
         return true;
     }
 
+    // Set callback to check if I2S writes should be skipped (e.g., during sound playback)
+    void setSkipWriteCallback(ShouldSkipWriteCallback cb) {
+        m_skipWriteCallback = cb;
+    }
+
     // Enqueue audio data from BT callback (non-blocking)
     void enqueue(const uint8_t *data, uint32_t len, uint8_t bits, uint8_t channels) {
         if (!m_audioQueue || !m_freeQueue || len == 0) return;
@@ -149,6 +159,15 @@ public:
     void processBuffer(DSPProcessor &dsp, I2SOutput &i2s) {
         AudioBuf *buf = nullptr;
         
+        // Check if we should skip I2S write (e.g., sound effect playing)
+        bool skipWrite = m_skipWriteCallback && m_skipWriteCallback();
+        
+        // Detect transition to exclusive sound - clear DMA for instant cutoff
+        if (skipWrite && !m_wasSkipping) {
+            i2s.zeroDMA();  // Clear I2S DMA for instant audio cutoff
+        }
+        m_wasSkipping = skipWrite;
+        
         // Use longer timeout (20ms) to reduce underrun during codec transitions
         // Short timeout causes unnecessary returns when BT decode is briefly delayed
         if (xQueueReceive(m_audioQueue, &buf, pdMS_TO_TICKS(20)) != pdTRUE || !buf) {
@@ -182,13 +201,15 @@ public:
                 process32bit(buf, frames, channels, dsp);
             }
 
-            size_t bytesToWrite = frames * 2u * sizeof(int32_t);
-            size_t written = i2s.write(m_dspOut, bytesToWrite);
+            if (!skipWrite) {
+                size_t bytesToWrite = frames * 2u * sizeof(int32_t);
+                size_t written = i2s.write(m_dspOut, bytesToWrite);
 
-            m_lastProcessMs = millis32();
+                m_lastProcessMs = millis32();
 
-            if (written < bytesToWrite) {
-                m_shortWriteCount++;
+                if (written < bytesToWrite) {
+                    m_shortWriteCount++;
+                }
             }
         }
 
@@ -196,16 +217,23 @@ public:
         xQueueSend(m_freeQueue, &buf, 0);
     }
 
-    // Clear all queued audio
+    // Clear all queued audio (fast path - no waiting)
     void clear() {
         if (!m_audioQueue || !m_freeQueue) return;
         
         AudioBuf *buf = nullptr;
+        // Drain all buffers from audio queue back to free pool
         while (xQueueReceive(m_audioQueue, &buf, 0) == pdTRUE) {
             if (buf) {
                 xQueueSend(m_freeQueue, &buf, 0);
             }
         }
+    }
+
+    // Aggressive clear - also zeros I2S DMA buffers for faster audio cutoff
+    void clearWithDMA(I2SOutput& i2s) {
+        clear();
+        i2s.zeroDMA();
     }
 
     uint32_t getLastProcessMs() const { return m_lastProcessMs; }
@@ -392,4 +420,7 @@ private:
     volatile uint32_t m_enqueueFail;
     volatile uint32_t m_shortWriteCount;
     volatile uint32_t m_lastProcessMs;
+    
+    ShouldSkipWriteCallback m_skipWriteCallback;
+    bool m_wasSkipping;  // Track state transition for DMA clearing
 };

@@ -38,6 +38,10 @@ public:
     using LedEffectCallback = void(*)(uint8_t effectId);
     // LED settings callback - receives full LED settings packet (brightness, colors, gradient, speed, effectId)
     using LedSettingsCallback = void(*)(const uint8_t* data, size_t len);
+    // Sound control callback - receives sound commands (mute, delete, etc)
+    using SoundCtrlCallback = void(*)(const uint8_t* data, size_t len);
+    // Sound data callback - receives sound file upload data
+    using SoundDataCallback = void(*)(const uint8_t* data, size_t len);
 
     BleGattService()
         : m_gattsIf(0)
@@ -57,6 +61,8 @@ public:
         , m_otaCtrlCharHandle(0)
         , m_otaDataCharHandle(0)
         , m_ledSettingsCharHandle(0)
+        , m_soundCtrlCharHandle(0)
+        , m_soundDataCharHandle(0)
         // Callbacks
         , m_controlCb(nullptr)
         , m_eqCb(nullptr)
@@ -65,6 +71,8 @@ public:
         , m_otaDataCb(nullptr)
         , m_ledEffectCb(nullptr)
         , m_ledSettingsCb(nullptr)
+        , m_soundCtrlCb(nullptr)
+        , m_soundDataCb(nullptr)
     {
         memset(m_uuidLevelsService, 0, 16);
         memset(m_uuidLevelsChar, 0, 16);
@@ -77,6 +85,8 @@ public:
         memset(m_uuidOtaCtrlChar, 0, 16);
         memset(m_uuidOtaDataChar, 0, 16);
         memset(m_uuidLedSettingsChar, 0, 16);
+        memset(m_uuidSoundCtrlChar, 0, 16);
+        memset(m_uuidSoundDataChar, 0, 16);
         
         // Initialize characteristic values
         memset(m_controlValue, 0, sizeof(m_controlValue));
@@ -92,12 +102,17 @@ public:
         m_ledSettingsValue[4] = 128;  // r2
         m_ledSettingsValue[6] = 255;  // b2
         m_ledSettingsValue[8] = 50;   // speed
+        
+        // Initialize sound status (will be updated by main before BLE connects)
+        m_soundStatusValue = 0;
     }
 
     void setCallbacks(ControlCallback ctrlCb, EqCallback eqCb, NameCallback nameCb,
                       OtaCtrlCallback otaCtrlCb, OtaDataCallback otaDataCb,
                       LedEffectCallback ledEffectCb = nullptr,
-                      LedSettingsCallback ledSettingsCb = nullptr) {
+                      LedSettingsCallback ledSettingsCb = nullptr,
+                      SoundCtrlCallback soundCtrlCb = nullptr,
+                      SoundDataCallback soundDataCb = nullptr) {
         m_controlCb = ctrlCb;
         m_eqCb = eqCb;
         m_nameCb = nameCb;
@@ -105,6 +120,8 @@ public:
         m_otaDataCb = otaDataCb;
         m_ledEffectCb = ledEffectCb;
         m_ledSettingsCb = ledSettingsCb;
+        m_soundCtrlCb = soundCtrlCb;
+        m_soundDataCb = soundDataCb;
     }
 
     bool init(const char* deviceName, const char* fwVersion,
@@ -135,6 +152,8 @@ public:
         uuid128FromString(APP_BLE_CHAR_UUID_OTA_CTRL, m_uuidOtaCtrlChar);
         uuid128FromString(APP_BLE_CHAR_UUID_OTA_DATA, m_uuidOtaDataChar);
         uuid128FromString(APP_BLE_CHAR_UUID_LED_SETTINGS, m_uuidLedSettingsChar);
+        uuid128FromString(APP_BLE_CHAR_UUID_SOUND_CTRL, m_uuidSoundCtrlChar);
+        uuid128FromString(APP_BLE_CHAR_UUID_SOUND_DATA, m_uuidSoundDataChar);
 
         // Init Bluetooth controller
         esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
@@ -279,6 +298,23 @@ public:
                 ESP_LOGD(TAG, "LED settings notify failed: %d", ret);
             }
         }
+    }
+
+    // Notify sound status to connected client
+    void notifySoundStatus(uint8_t status) {
+        if (m_connected && m_soundCtrlCharHandle && m_gattsIf) {
+            m_soundStatusValue = status;
+            esp_err_t ret = esp_ble_gatts_send_indicate(m_gattsIf, m_connId, m_soundCtrlCharHandle,
+                                        1, &m_soundStatusValue, false);
+            if (ret != ESP_OK) {
+                ESP_LOGD(TAG, "Sound status notify failed: %d", ret);
+            }
+        }
+    }
+    
+    // Set sound status (for pre-connection initialization)
+    void setSoundStatus(uint8_t status) {
+        m_soundStatusValue = status;
     }
 
     // Get control byte value
@@ -481,6 +517,13 @@ private:
             addCharacteristic(m_controlServiceHandle, m_uuidLedSettingsChar,
                              ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
                              ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_WRITE | ESP_GATT_CHAR_PROP_BIT_NOTIFY);
+            addCharacteristic(m_controlServiceHandle, m_uuidSoundCtrlChar,
+                             ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+                             ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_WRITE | ESP_GATT_CHAR_PROP_BIT_NOTIFY);
+            // Sound Data supports both WRITE (with ACK) and WRITE_NR (fast) for batched transfers
+            addCharacteristic(m_controlServiceHandle, m_uuidSoundDataChar,
+                             ESP_GATT_PERM_WRITE,
+                             ESP_GATT_CHAR_PROP_BIT_WRITE | ESP_GATT_CHAR_PROP_BIT_WRITE_NR);
         }
     }
 
@@ -518,10 +561,16 @@ private:
         } else if (uuidEqual128(param->add_char.char_uuid, m_uuidLedSettingsChar)) {
             m_ledSettingsCharHandle = handle;
             ESP_LOGI(TAG, "LED Settings char handle assigned: %d", handle);
+        } else if (uuidEqual128(param->add_char.char_uuid, m_uuidSoundCtrlChar)) {
+            m_soundCtrlCharHandle = handle;
+            ESP_LOGI(TAG, "Sound Ctrl char handle assigned: %d", handle);
+        } else if (uuidEqual128(param->add_char.char_uuid, m_uuidSoundDataChar)) {
+            m_soundDataCharHandle = handle;
+            ESP_LOGI(TAG, "Sound Data char handle assigned: %d", handle);
         }
 
         // Add CCCD for characteristics that support notify
-        if (handle != m_otaDataCharHandle) {
+        if (handle != m_otaDataCharHandle && handle != m_soundDataCharHandle) {
             esp_bt_uuid_t cccdUuid = {};
             cccdUuid.len = ESP_UUID_LEN_16;
             cccdUuid.uuid.uuid16 = 0x2902;
@@ -576,6 +625,11 @@ private:
             vTaskDelay(pdMS_TO_TICKS(100));
             
             if (!self->m_connected) { vTaskDelete(NULL); return; }
+            // Send sound status
+            self->notifySoundStatus(self->m_soundStatusValue);
+            vTaskDelay(pdMS_TO_TICKS(100));
+            
+            if (!self->m_connected) { vTaskDelete(NULL); return; }
             // Retry control notification
             self->updateControl(self->m_controlValue[0]);
             
@@ -626,6 +680,11 @@ private:
             memcpy(rsp.attr_value.value, m_ledSettingsValue, 10);
             ESP_LOGI(TAG, "LED Settings READ: brightness=%d, gradient=%d, speed=%d", 
                      m_ledSettingsValue[0], m_ledSettingsValue[7], m_ledSettingsValue[8]);
+        } else if (param->read.handle == m_soundCtrlCharHandle) {
+            // Return sound status byte (bit0-3: exists, bit7: muted)
+            rsp.attr_value.len = 1;
+            rsp.attr_value.value[0] = m_soundStatusValue;
+            ESP_LOGI(TAG, "Sound Status READ: value=0x%02X", m_soundStatusValue);
         }
 
         esp_ble_gatts_send_response(gatts_if, param->read.conn_id,
@@ -663,6 +722,11 @@ private:
             if (m_otaCtrlCb) m_otaCtrlCb(data, len);
         } else if (handle == m_otaDataCharHandle && len >= 1) {
             if (m_otaDataCb) m_otaDataCb(data, len);
+        } else if (handle == m_soundCtrlCharHandle && len >= 1) {
+            ESP_LOGI(TAG, "SOUND CTRL write: len=%u, first=%02X", len, data[0]);
+            if (m_soundCtrlCb) m_soundCtrlCb(data, len);
+        } else if (handle == m_soundDataCharHandle && len >= 1) {
+            if (m_soundDataCb) m_soundDataCb(data, len);
         }
 
         if (param->write.need_rsp) {
@@ -702,6 +766,8 @@ private:
     uint16_t m_otaCtrlCharHandle;
     uint16_t m_otaDataCharHandle;
     uint16_t m_ledSettingsCharHandle;
+    uint16_t m_soundCtrlCharHandle;
+    uint16_t m_soundDataCharHandle;
 
     // UUIDs (little-endian)
     uint8_t m_uuidLevelsService[16];
@@ -715,12 +781,15 @@ private:
     uint8_t m_uuidOtaCtrlChar[16];
     uint8_t m_uuidOtaDataChar[16];
     uint8_t m_uuidLedSettingsChar[16];
+    uint8_t m_uuidSoundCtrlChar[16];
+    uint8_t m_uuidSoundDataChar[16];
 
     // Characteristic values
     uint8_t m_controlValue[1];
     uint8_t m_eqValue[3];
     uint8_t m_ledEffectValue[1];
     uint8_t m_ledSettingsValue[10];  // [brightness, r1, g1, b1, r2, g2, b2, gradient, speed, effectId]
+    uint8_t m_soundStatusValue;        // bit0-3: exists flags, bit7: muted
     char m_nameValue[64];
     char m_fwValue[32];
     char m_levelsValue[32];
@@ -733,4 +802,6 @@ private:
     OtaDataCallback m_otaDataCb;
     LedEffectCallback m_ledEffectCb;
     LedSettingsCallback m_ledSettingsCb;
+    SoundCtrlCallback m_soundCtrlCb;
+    SoundDataCallback m_soundDataCb;
 };

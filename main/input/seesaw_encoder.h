@@ -364,9 +364,9 @@ public:
             // Use delta reading instead of absolute position for reliability
             int32_t delta = getEncoderDelta(e);
             
-            // Validate delta - reject wild jumps (more than ±50 in one poll)
-            // Normal encoder movement should be small (±1 to ±5 per poll)
-            if (delta != 0 && delta >= -50 && delta <= 50) {
+            // Validate delta - reject wild jumps (more than ±30 in one poll)
+            // Normal encoder movement should be small
+            if (delta != 0 && delta >= -20 && delta <= 20) {
                 m_changed[e] = true;
                 m_positions[e] += delta;
             } else if (delta != 0) {

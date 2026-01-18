@@ -12,6 +12,9 @@
 #include "esp_log.h"
 #include "../config/app_config.h"
 
+// Callback for sample rate change notifications
+using SampleRateChangeCallback = void(*)(uint32_t newRate);
+
 class I2SOutput {
 public:
     I2SOutput() 
@@ -19,6 +22,7 @@ public:
         , m_sampleRate(0)
         , m_reconfig(false)
         , m_mutex(nullptr)
+        , m_sampleRateCallback(nullptr)
     {
     }
 
@@ -123,6 +127,11 @@ public:
         if (err == ESP_OK) {
             m_sampleRate = sampleRate;
             ESP_LOGI(TAG, "I2S clock updated: sr=%u", (unsigned)sampleRate);
+            
+            // Notify SoundPlayer about sample rate change
+            if (m_sampleRateCallback) {
+                m_sampleRateCallback(sampleRate);
+            }
         } else {
             ESP_LOGE(TAG, "i2s_set_clk failed: %s", esp_err_to_name(err));
         }
@@ -130,6 +139,16 @@ public:
         i2s_start((i2s_port_t)APP_I2S_PORT);
         m_reconfig = false;
         unlock();
+    }
+    
+    // Set callback for sample rate changes
+    void setSampleRateCallback(SampleRateChangeCallback cb) {
+        m_sampleRateCallback = cb;
+    }
+    
+    // Get current sample rate
+    uint32_t getSampleRate() const {
+        return m_sampleRate;
     }
 
     // Reset to default sample rate (on disconnect)
@@ -172,7 +191,6 @@ public:
 
     bool isInitialized() const { return m_initialized; }
     bool isReconfiguring() const { return m_reconfig; }
-    uint32_t getSampleRate() const { return m_sampleRate; }
 
     void lock() {
         if (m_mutex) xSemaphoreTake(m_mutex, portMAX_DELAY);
@@ -189,4 +207,5 @@ private:
     uint32_t m_sampleRate;
     volatile bool m_reconfig;
     SemaphoreHandle_t m_mutex;
+    SampleRateChangeCallback m_sampleRateCallback;
 };
