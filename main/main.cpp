@@ -51,6 +51,7 @@ static volatile uint8_t  g_bitsPerSample = 16;
 static volatile uint8_t  g_channels = 2;
 static volatile uint32_t g_sampleRate = APP_I2S_DEFAULT_SAMPLE_RATE;
 static volatile bool     g_otaActive = false;
+static volatile int64_t  g_otaCheckPassedTime = 0;  // Timestamp when CHECK passed (0 = not passed)
 
 // Beat detection state
 static float smooth30_dB = -60.0f;
@@ -292,6 +293,14 @@ static void onBleLedSettings(const uint8_t* data, size_t len) {
 static volatile uint32_t g_otaReceived = 0;
 static volatile uint32_t g_otaTotalSize = 0;
 
+// OTA sequence number tracking for reordering
+static uint16_t g_otaExpectedSeq = 0;
+static const size_t OTA_REORDER_SLOTS = 32;
+static const size_t OTA_MAX_CHUNK = 514;  // 512 data + 2 seq
+static uint8_t g_otaReorderBuf[OTA_REORDER_SLOTS][OTA_MAX_CHUNK];
+static size_t g_otaReorderLen[OTA_REORDER_SLOTS];
+static bool g_otaReorderValid[OTA_REORDER_SLOTS];
+
 // Parse OTA control command - supports both binary and ASCII protocols
 // Binary: 0x01 + 4-byte size (BEGIN), 0x03 (END), 0x04 (ABORT)
 // ASCII: "BEGIN:<size>", "END", "ABORT"
@@ -324,6 +333,8 @@ static void onBleOtaCtrl(const uint8_t* data, size_t len) {
         g_otaActive = true;
         g_otaReceived = 0;
         g_otaTotalSize = size;
+        g_otaExpectedSeq = 0;
+        memset(g_otaReorderValid, 0, sizeof(g_otaReorderValid));
         if (!g_update.begin(size)) {
             ESP_LOGE(TAG, "OTA begin failed: %s", g_update.errorString());
             g_ble.notifyOtaCtrl("BEGIN_ERR");
@@ -340,7 +351,30 @@ static void onBleOtaCtrl(const uint8_t* data, size_t len) {
     }
     
     if (data[0] == 'E' && len >= 3 && memcmp(data, "END", 3) == 0) {
-        ESP_LOGI(TAG, "OTA END (ASCII): received %u bytes total", (unsigned)g_otaReceived);
+        // Clear auto-finalize timer since we got END
+        g_otaCheckPassedTime = 0;
+        ESP_LOGI(TAG, "OTA END received, flushing remaining data...");
+        
+        // Wait for any remaining BLE packets to be processed
+        // The BLE stack may have queued packets that haven't been delivered yet
+        uint32_t lastReceived = g_otaReceived;
+        for (int i = 0; i < 10; i++) {  // Wait up to 1 second
+            vTaskDelay(pdMS_TO_TICKS(100));
+            if (g_otaReceived == lastReceived) {
+                // No new data for 100ms, assume all data received
+                break;
+            }
+            lastReceived = g_otaReceived;
+            ESP_LOGI(TAG, "OTA: still receiving data, now at %u bytes", (unsigned)g_otaReceived);
+        }
+        
+        ESP_LOGI(TAG, "OTA END (ASCII): received %u / %u bytes total", (unsigned)g_otaReceived, (unsigned)g_otaTotalSize);
+        
+        // Check if we received all expected bytes
+        if (g_otaTotalSize > 0 && g_otaReceived < g_otaTotalSize) {
+            ESP_LOGW(TAG, "OTA incomplete: missing %u bytes", (unsigned)(g_otaTotalSize - g_otaReceived));
+        }
+        
         if (g_update.end(true)) {
             g_ble.notifyOtaCtrl("END_OK");
             ESP_LOGI(TAG, "OTA complete, restarting...");
@@ -351,6 +385,59 @@ static void onBleOtaCtrl(const uint8_t* data, size_t len) {
             g_ble.notifyOtaCtrl("END_ERR");
         }
         g_otaActive = false;
+        return;
+    }
+    
+    // CHECK command - verify byte count before END
+    if (data[0] == 'C' && len >= 6 && memcmp(data, "CHECK:", 6) == 0) {
+        // Parse expected size from "CHECK:<size>"
+        uint32_t expectedSize = 0;
+        for (size_t i = 6; i < len && data[i] >= '0' && data[i] <= '9'; i++) {
+            expectedSize = expectedSize * 10 + (data[i] - '0');
+        }
+        
+        ESP_LOGI(TAG, "OTA CHECK: received %u / %u expected bytes", (unsigned)g_otaReceived, (unsigned)expectedSize);
+        
+        // Wait a moment for any remaining BLE packets
+        vTaskDelay(pdMS_TO_TICKS(200));
+        
+        if (g_otaReceived >= expectedSize) {
+            g_ble.notifyOtaCtrl("CHECK_OK");
+            ESP_LOGI(TAG, "OTA CHECK passed");
+            
+            // Record timestamp for auto-finalize fallback
+            g_otaCheckPassedTime = esp_timer_get_time();
+            ESP_LOGI(TAG, "Starting auto-finalize timer (3s timeout)");
+            
+            // Start a task to auto-finalize if no END received within 3 seconds
+            xTaskCreate([](void* param) {
+                vTaskDelay(pdMS_TO_TICKS(3000));
+                
+                // Check if CHECK passed but no END was received (g_otaActive still true)
+                if (g_otaActive && g_otaCheckPassedTime > 0) {
+                    ESP_LOGW(TAG, "OTA: No END received after CHECK passed, auto-finalizing...");
+                    
+                    if (g_update.end(true)) {
+                        ESP_LOGI(TAG, "OTA auto-finalize complete, rebooting in 1s");
+                        g_ble.notifyOtaCtrl("END_OK");
+                        vTaskDelay(pdMS_TO_TICKS(1000));
+                        esp_restart();
+                    } else {
+                        ESP_LOGE(TAG, "OTA auto-finalize failed: %s", g_update.errorString());
+                        g_ble.notifyOtaCtrl("END_ERR");
+                    }
+                    g_otaActive = false;
+                    g_otaCheckPassedTime = 0;
+                }
+                vTaskDelete(NULL);
+            }, "ota_auto_end", 4096, NULL, 5, NULL);
+        } else {
+            // Report how many bytes we're missing
+            char resp[32];
+            snprintf(resp, sizeof(resp), "CHECK_FAIL:%u", (unsigned)g_otaReceived);
+            g_ble.notifyOtaCtrl(resp);
+            ESP_LOGW(TAG, "OTA CHECK failed: missing %u bytes", (unsigned)(expectedSize - g_otaReceived));
+        }
         return;
     }
     
@@ -384,6 +471,8 @@ static void onBleOtaCtrl(const uint8_t* data, size_t len) {
         g_otaActive = true;
         g_otaReceived = 0;
         g_otaTotalSize = size;
+        g_otaExpectedSeq = 0;
+        memset(g_otaReorderValid, 0, sizeof(g_otaReorderValid));
         if (!g_update.begin(size)) {
             ESP_LOGE(TAG, "OTA begin failed: %s", g_update.errorString());
             g_ble.notifyOtaCtrl("BEGIN_ERR");
@@ -397,7 +486,25 @@ static void onBleOtaCtrl(const uint8_t* data, size_t len) {
             g_ble.notifyOtaCtrl("BEGIN_OK");
         }
     } else if (cmd == 0x03) { // END
-        ESP_LOGI(TAG, "OTA END (binary): received %u bytes total", (unsigned)g_otaReceived);
+        ESP_LOGI(TAG, "OTA END (binary) received, flushing remaining data...");
+        
+        // Wait for any remaining BLE packets to be processed
+        uint32_t lastReceived = g_otaReceived;
+        for (int i = 0; i < 10; i++) {  // Wait up to 1 second
+            vTaskDelay(pdMS_TO_TICKS(100));
+            if (g_otaReceived == lastReceived) {
+                break;
+            }
+            lastReceived = g_otaReceived;
+            ESP_LOGI(TAG, "OTA: still receiving data, now at %u bytes", (unsigned)g_otaReceived);
+        }
+        
+        ESP_LOGI(TAG, "OTA END (binary): received %u / %u bytes total", (unsigned)g_otaReceived, (unsigned)g_otaTotalSize);
+        
+        if (g_otaTotalSize > 0 && g_otaReceived < g_otaTotalSize) {
+            ESP_LOGW(TAG, "OTA incomplete: missing %u bytes", (unsigned)(g_otaTotalSize - g_otaReceived));
+        }
+        
         if (g_update.end(true)) {
             g_ble.notifyOtaCtrl("END_OK");
             ESP_LOGI(TAG, "OTA complete, restarting...");
@@ -419,9 +526,13 @@ static void onBleOtaCtrl(const uint8_t* data, size_t len) {
 
 static void onBleOtaData(const uint8_t* data, size_t len) {
     if (!g_otaActive || len == 0) return;
+    
+    // Ignore 1-byte flush packets (used by Android to sync at end)
+    if (len == 1) return;
+    
+    // Direct write - rely on BLE ACK for ordering
+    g_update.write(data, len);
     g_otaReceived += len;
-    size_t written = g_update.write(data, len);
-    (void)written;  // Avoid unused variable warning
     
     // Calculate and update progress
     uint8_t pct = (g_otaTotalSize > 0) ? (uint8_t)((uint64_t)g_otaReceived * 100 / g_otaTotalSize) : 0;
