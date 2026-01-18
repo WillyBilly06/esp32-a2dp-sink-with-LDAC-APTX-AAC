@@ -216,7 +216,8 @@ export.bat
 :: Build and flash
 cd D:\path\to\project
 idf.py build
-idf.py -p COM10 flash
+idf.py -p COMXX flash
+:: XX will be the COM of the current connected ESP32 on your computer
 ```
 
 **Flash to both OTA partitions** (recommended for OTA reliability):
