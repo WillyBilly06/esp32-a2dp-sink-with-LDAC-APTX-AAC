@@ -29,7 +29,7 @@ public:
         return instance;
     }
     
-    bool init(gpio_num_t gpioPin, uint8_t brightness = LED_DEFAULT_BRIGHTNESS) {
+    bool init(gpio_num_t gpioPin, uint8_t brightness = LED_DEFAULT_BRIGHTNESS, bool playStartup = false) {
         m_brightness = brightness;
         
         if (m_driver.init(gpioPin) != ESP_OK) {
@@ -40,8 +40,10 @@ public:
         // Create all effects
         createEffects();
         
-        // Play startup animation
-        playStartupAnimation();
+        // Play startup animation if requested
+        if (playStartup) {
+            playStartupAnimation();
+        }
         
         // Load saved effect from NVS
         loadSettings();
@@ -178,6 +180,31 @@ public:
     }
     
     const uint8_t* getLedSettings() const { return m_ledSettings; }
+    
+    // Request startup animation to be played from LED task context
+    void requestStartupAnimation() {
+        m_pendingStartupAnimation = true;
+        ESP_LOGI(LED_TAG, "Startup animation requested");
+    }
+    
+    // Check if startup animation is pending and clear the flag
+    bool consumePendingStartupAnimation() {
+        if (m_pendingStartupAnimation) {
+            m_pendingStartupAnimation = false;
+            return true;
+        }
+        return false;
+    }
+    
+    // Check if startup animation is currently running
+    bool isStartupAnimationRunning() const {
+        return m_startupAnimationRunning;
+    }
+    
+    // Mark startup animation as running/complete (called from LED task)
+    void setStartupAnimationRunning(bool running) {
+        m_startupAnimationRunning = running;
+    }
     
     void saveLedSettings() {
         nvs_handle_t handle;
@@ -791,7 +818,8 @@ private:
         }
     }
     
-    // Startup animation - colorful spiral wipe
+public:
+    // Startup animation - colorful spiral wipe (public so main can trigger it)
     void playStartupAnimation() {
         ESP_LOGI(LED_TAG, "Playing startup animation...");
         
@@ -915,6 +943,12 @@ private:
     float m_volumeDisplaySmooth = 0.5f;
     
     // Temporary brightness override for volume overlay when user brightness is 0
+    // This allows volume overlay to be visible even when effects are disabled
+    uint8_t m_overlayBrightness = 0;
+    
+    // Flag to request startup animation from LED task context
+    volatile bool m_pendingStartupAnimation = false;
+    volatile bool m_startupAnimationRunning = false;
     bool m_volumeBrightnessOverride = false;
     uint8_t m_brightnessBeforeVolume = 0;
     
@@ -1142,6 +1176,13 @@ static void ledTask(void* param) {
     LedAudioReadings readings;
     
     while (ledTaskRunning) {
+        // Check if startup animation was requested (runs once at startup)
+        if (controller.consumePendingStartupAnimation()) {
+            controller.setStartupAnimationRunning(true);
+            controller.playStartupAnimation();
+            controller.setStartupAnimationRunning(false);
+        }
+        
         // Check if in OTA mode - render progress bar instead of effects
         if (controller.isOtaMode()) {
             controller.renderOtaProgress();
