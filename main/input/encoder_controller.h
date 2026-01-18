@@ -58,8 +58,12 @@ static const char* ENC_TAG = "EncoderCtrl";
 // Callbacks
 typedef void (*VolumeChangedCb)(uint8_t volume);
 typedef void (*PlayPauseCb)();
+typedef void (*NextTrackCb)();
+typedef void (*PrevTrackCb)();
 typedef void (*EqChangedCb)(int8_t bass, int8_t mid, int8_t treble);
 typedef void (*BrightnessChangedCb)(uint8_t brightness);
+typedef void (*PairingModeCb)();
+typedef void (*EffectChangedCb)(int effectId, bool confirmed);  // confirmed=true when selection is finalized
 
 class EncoderController {
 public:
@@ -121,14 +125,24 @@ public:
     // Set callbacks
     void setVolumeCallback(VolumeChangedCb cb) { m_volumeCb = cb; }
     void setPlayPauseCallback(PlayPauseCb cb) { m_playPauseCb = cb; }
+    void setNextTrackCallback(NextTrackCb cb) { m_nextTrackCb = cb; }
+    void setPrevTrackCallback(PrevTrackCb cb) { m_prevTrackCb = cb; }
     void setEqCallback(EqChangedCb cb) { m_eqCb = cb; }
     void setBrightnessCallback(BrightnessChangedCb cb) { m_brightnessCb = cb; }
+    void setPairingModeCallback(PairingModeCb cb) { m_pairingCb = cb; }
+    void setEffectCallback(EffectChangedCb cb) { m_effectCb = cb; }
     
     // Set current values
     void setCurrentVolume(uint8_t volume) { m_volume = (volume <= VOLUME_MAX) ? volume : VOLUME_MAX; }
     void setCurrentEq(int8_t bass, int8_t mid, int8_t treble) { m_bass = bass; m_mid = mid; m_treble = treble; }
     void setCurrentBrightness(uint8_t brightness) {
         m_brightness = brightness;
+    }
+    void setCurrentEffect(int effectId) {
+        m_effectId = effectId;
+    }
+    void setMaxEffect(int maxEffect) {
+        m_maxEffect = maxEffect;
     }
     
     // Poll - call this regularly (like Arduino loop)
@@ -142,7 +156,7 @@ public:
         
         // ------ Check buttons with debounce ------
         
-        // Volume button = play/pause (with debounce)
+        // Volume button = play/pause/next/prev (with multi-click detection)
         bool volBtnRaw = m_encoder.isButtonPressed(ENC_VOLUME);
         if (volBtnRaw) {
             if (m_btnDebounce[ENC_VOLUME] < DEBOUNCE_COUNT) m_btnDebounce[ENC_VOLUME]++;
@@ -150,11 +164,33 @@ public:
             m_btnDebounce[ENC_VOLUME] = 0;
         }
         bool volBtn = (m_btnDebounce[ENC_VOLUME] >= DEBOUNCE_COUNT);
+        
+        // Detect button press (rising edge after debounce)
         if (volBtn && !m_lastBtnState[ENC_VOLUME]) {
-            if (m_playPauseCb) m_playPauseCb();
-            ESP_LOGI(ENC_TAG, "Play/Pause pressed");
+            // Button just pressed - increment click count
+            m_volClickCount++;
+            m_volLastClickTime = xTaskGetTickCount();
         }
         m_lastBtnState[ENC_VOLUME] = volBtn;
+        
+        // Check if we should process clicks (after timeout)
+        if (m_volClickCount > 0) {
+            TickType_t elapsed = xTaskGetTickCount() - m_volLastClickTime;
+            if (elapsed > pdMS_TO_TICKS(MULTI_CLICK_TIMEOUT_MS)) {
+                // Process the accumulated clicks
+                if (m_volClickCount == 1) {
+                    if (m_playPauseCb) m_playPauseCb();
+                    ESP_LOGI(ENC_TAG, "Play/Pause (single click)");
+                } else if (m_volClickCount == 2) {
+                    if (m_nextTrackCb) m_nextTrackCb();
+                    ESP_LOGI(ENC_TAG, "Next track (double click)");
+                } else if (m_volClickCount >= 3) {
+                    if (m_prevTrackCb) m_prevTrackCb();
+                    ESP_LOGI(ENC_TAG, "Previous track (triple click)");
+                }
+                m_volClickCount = 0;
+            }
+        }
         
         // Bass button = brightness cycle (with debounce)
         bool bassBtnRaw = m_encoder.isButtonPressed(ENC_BASS);
@@ -180,6 +216,52 @@ public:
             m_encoder.showPixels();
         }
         m_lastBtnState[ENC_BASS] = bassBtn;
+        
+        // Mid button = pairing mode (with debounce)
+        bool midBtnRaw = m_encoder.isButtonPressed(ENC_MID);
+        if (midBtnRaw) {
+            if (m_btnDebounce[ENC_MID] < DEBOUNCE_COUNT) m_btnDebounce[ENC_MID]++;
+        } else {
+            m_btnDebounce[ENC_MID] = 0;
+        }
+        bool midBtn = (m_btnDebounce[ENC_MID] >= DEBOUNCE_COUNT);
+        if (midBtn && !m_lastBtnState[ENC_MID]) {
+            // Mid button pressed - trigger pairing mode
+            if (m_pairingCb) m_pairingCb();
+            ESP_LOGI(ENC_TAG, "Pairing mode button pressed");
+            
+            // Flash mid LED to indicate pairing
+            m_encoder.setPixelColor(ENC_MID, 0, 100, 100);  // Cyan = pairing
+            m_encoder.showPixels();
+        }
+        m_lastBtnState[ENC_MID] = midBtn;
+        
+        // Treble button = effect selection mode (with debounce)
+        bool trebleBtnRaw = m_encoder.isButtonPressed(ENC_TREBLE);
+        if (trebleBtnRaw) {
+            if (m_btnDebounce[ENC_TREBLE] < DEBOUNCE_COUNT) m_btnDebounce[ENC_TREBLE]++;
+        } else {
+            m_btnDebounce[ENC_TREBLE] = 0;
+        }
+        bool trebleBtn = (m_btnDebounce[ENC_TREBLE] >= DEBOUNCE_COUNT);
+        if (trebleBtn && !m_lastBtnState[ENC_TREBLE]) {
+            m_effectMode = !m_effectMode;
+            if (m_effectMode) {
+                // Enter effect selection mode - change treble encoder LED to purple
+                m_encoder.setPixelColor(ENC_TREBLE, 100, 0, 100);  // Purple = effect mode
+                m_previewEffectId = m_effectId;  // Start from current effect
+                ESP_LOGI(ENC_TAG, "Effect mode: ON (rotate treble encoder to preview, press again to confirm)");
+            } else {
+                // Exit effect mode - restore treble encoder LED to yellow
+                m_encoder.setPixelColor(ENC_TREBLE, 100, 100, 0);  // Yellow = normal
+                m_effectId = m_previewEffectId;  // Confirm the selection
+                ESP_LOGI(ENC_TAG, "Effect mode: OFF - selected effect: %d", m_effectId);
+                // Notify effect confirmed
+                if (m_effectCb) m_effectCb(m_effectId, true);
+            }
+            m_encoder.showPixels();
+        }
+        m_lastBtnState[ENC_TREBLE] = trebleBtn;
         
         // ------ Check encoders (like Arduino: if (enc_positions[e] != new_position)) ------
         
@@ -239,16 +321,30 @@ public:
             }
         }
         
-        // Treble encoder
+        // Treble encoder - effect selection in effect mode, otherwise adjust treble EQ
         if (m_encoder.hasChanged(ENC_TREBLE)) {
             int32_t newPos = m_encoder.getPosition(ENC_TREBLE);
             int32_t delta = newPos - m_lastPos[ENC_TREBLE];
             m_lastPos[ENC_TREBLE] = newPos;
             
             if (delta != 0) {
-                m_treble = clampEq(m_treble + delta * EQ_STEP);
-                eqChanged = true;
-                ESP_LOGI(ENC_TAG, "Treble: %d (pos: %ld)", m_treble, (long)newPos);
+                if (m_effectMode) {
+                    // Effect selection mode - cycle through effects
+                    int newEffect = m_previewEffectId + delta;
+                    // Wrap around
+                    if (newEffect < 0) newEffect = m_maxEffect - 1;
+                    if (newEffect >= m_maxEffect) newEffect = 0;
+                    m_previewEffectId = newEffect;
+                    
+                    // Notify effect change (preview, not confirmed)
+                    if (m_effectCb) m_effectCb(m_previewEffectId, false);
+                    ESP_LOGI(ENC_TAG, "Effect preview: %d (pos: %ld)", m_previewEffectId, (long)newPos);
+                } else {
+                    // Normal treble EQ mode
+                    m_treble = clampEq(m_treble + delta * EQ_STEP);
+                    eqChanged = true;
+                    ESP_LOGI(ENC_TAG, "Treble: %d (pos: %ld)", m_treble, (long)newPos);
+                }
             }
         }
         
@@ -288,8 +384,19 @@ private:
     // Brightness adjustment mode
     bool m_brightnessMode = false;
     static constexpr int BRIGHTNESS_STEP = 5;  // Step for encoder brightness adjustment
-    static constexpr uint8_t BRIGHTNESS_MIN = 5;
+    static constexpr uint8_t BRIGHTNESS_MIN = 0;  // Allow full off
     static constexpr uint8_t BRIGHTNESS_MAX = 255;
+    
+    // Effect selection mode
+    bool m_effectMode = false;
+    int m_effectId = 0;         // Current confirmed effect
+    int m_previewEffectId = 0;  // Effect being previewed
+    int m_maxEffect = 24;       // Default to LED_EFFECT_COUNT
+    
+    // Multi-click detection for volume button
+    static constexpr uint32_t MULTI_CLICK_TIMEOUT_MS = 300;  // Time window for multi-click
+    uint8_t m_volClickCount = 0;
+    TickType_t m_volLastClickTime = 0;
     
     // Current values
     uint8_t m_volume = 64;
@@ -301,8 +408,12 @@ private:
     // Callbacks
     VolumeChangedCb m_volumeCb = nullptr;
     PlayPauseCb m_playPauseCb = nullptr;
+    NextTrackCb m_nextTrackCb = nullptr;
+    PrevTrackCb m_prevTrackCb = nullptr;
     EqChangedCb m_eqCb = nullptr;
     BrightnessChangedCb m_brightnessCb = nullptr;
+    PairingModeCb m_pairingCb = nullptr;
+    EffectChangedCb m_effectCb = nullptr;
 };
 
 // Encoder task - runs on core 0 to avoid interfering with audio on core 1
