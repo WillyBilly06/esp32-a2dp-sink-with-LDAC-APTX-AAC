@@ -102,3 +102,36 @@
 #define APP_BLE_CHAR_UUID_SOUND_DATA  BLE_CHAR_UUID_SOUND_DATA
 #define APP_BLE_CHAR_UUID_OTA_CTRL    BLE_CHAR_UUID_OTA_CTRL
 #define APP_BLE_CHAR_UUID_OTA_DATA    BLE_CHAR_UUID_OTA_DATA
+
+// -----------------------------------------------------------
+// TWS (True Wireless Stereo) Configuration
+// -----------------------------------------------------------
+#ifdef CONFIG_TWS_ENABLE
+    #define APP_TWS_ENABLED             1
+    
+    #ifdef CONFIG_TWS_ROLE_PRIMARY
+        #define APP_TWS_ROLE            1  // Primary
+    #else
+        #define APP_TWS_ROLE            2  // Secondary
+    #endif
+    
+    #ifdef CONFIG_TWS_CHANNEL_LEFT
+        #define APP_TWS_CHANNEL         1  // Left
+    #else
+        #define APP_TWS_CHANNEL         2  // Right
+    #endif
+    
+    #define APP_TWS_SYNC_DELAY_MS       CONFIG_TWS_SYNC_DELAY_MS
+    
+    #ifdef CONFIG_TWS_FORCE_SBC
+        #define APP_TWS_FORCE_SBC       1
+    #else
+        #define APP_TWS_FORCE_SBC       0
+    #endif
+#else
+    #define APP_TWS_ENABLED             0
+    #define APP_TWS_ROLE                0  // Disabled
+    #define APP_TWS_CHANNEL             0  // Stereo
+    #define APP_TWS_SYNC_DELAY_MS       50
+    #define APP_TWS_FORCE_SBC           0
+#endif

@@ -40,6 +40,12 @@
 #include "input/encoder_controller.h"
 #endif
 
+// TWS (True Wireless Stereo) support
+#if APP_TWS_ENABLED
+#include "tws/tws_espnow.h"
+#include "tws/tws_audio_adapter.h"
+#endif
+
 static const char* TAG = "Main";
 
 // -----------------------------------------------------------
@@ -978,6 +984,11 @@ static void onCodecConfig(uint32_t rate, uint8_t bps, uint8_t channels) {
     g_i2s.updateClock(rate);
     g_dsp.setSampleRate(rate);
     
+    // Update TWS audio adapter with new sample rate
+    #if APP_TWS_ENABLED
+    TwsAudioAdapter::getInstance().setSampleRate(rate);
+    #endif
+    
     // Mark that we need to play connected sound after codec stabilizes
     g_lastCodecConfigTime = esp_timer_get_time();
     g_connectedSoundPending = true;
@@ -1100,6 +1111,39 @@ static void audioTxTask(void* arg) {
         g_pipeline.processBuffer(g_dsp, g_i2s);
     }
 }
+
+// -----------------------------------------------------------
+// TWS Secondary Audio Task - receives audio via ESP-NOW
+// -----------------------------------------------------------
+#if APP_TWS_ENABLED && APP_TWS_ROLE == 2
+static void twsSecondaryTask(void* arg) {
+    ESP_LOGI(TAG, "TWS Secondary audio task started");
+    
+    // Output buffer for processed audio (stereo int32)
+    static int32_t outBuf[512];  // Up to 256 stereo frames
+    
+    while (true) {
+        TwsAudioAdapter& adapter = TwsAudioAdapter::getInstance();
+        
+        // Receive and process audio from primary
+        uint32_t frames = adapter.receiveAndProcess(outBuf, 256, g_dsp);
+        
+        if (frames > 0) {
+            // Convert int32 to int16 for I2S output
+            int16_t i2sBuf[frames * 2];
+            for (uint32_t i = 0; i < frames * 2; i++) {
+                i2sBuf[i] = (int16_t)(outBuf[i] >> 16);
+            }
+            
+            // Write to I2S
+            g_i2s.write((uint8_t*)i2sBuf, frames * 4);  // 4 bytes per stereo frame (2x int16)
+        } else {
+            // No data, yield briefly
+            vTaskDelay(1);
+        }
+    }
+}
+#endif
 
 // -----------------------------------------------------------
 // Button handling task
@@ -1437,6 +1481,67 @@ extern "C" void app_main(void) {
         return g_sound.isExclusivePlaying();
     });
 
+    // ========================================================================
+    // TWS (True Wireless Stereo) Initialization
+    // ========================================================================
+    #if APP_TWS_ENABLED
+    {
+        ESP_LOGI(TAG, "========================================");
+        ESP_LOGI(TAG, "TWS MODE ENABLED");
+        ESP_LOGI(TAG, "  Role: %s", APP_TWS_ROLE == 1 ? "PRIMARY" : "SECONDARY");
+        ESP_LOGI(TAG, "  Channel: %s", APP_TWS_CHANNEL == 1 ? "LEFT" : "RIGHT");
+        ESP_LOGI(TAG, "  Sync Delay: %d ms", APP_TWS_SYNC_DELAY_MS);
+        ESP_LOGI(TAG, "  Force SBC: %s", APP_TWS_FORCE_SBC ? "YES" : "NO");
+        ESP_LOGI(TAG, "========================================");
+        
+        TwsRole twsRole = (APP_TWS_ROLE == 1) ? TwsRole::Primary : TwsRole::Secondary;
+        TwsChannel twsChannel = (APP_TWS_CHANNEL == 1) ? TwsChannel::Left : TwsChannel::Right;
+        
+        // Initialize TWS manager
+        TwsManager& tws = TwsManager::getInstance();
+        if (!tws.init(twsRole, twsChannel)) {
+            ESP_LOGE(TAG, "TWS init failed!");
+        } else {
+            // Initialize TWS audio adapter
+            TwsAudioAdapter& twsAudio = TwsAudioAdapter::getInstance();
+            if (!twsAudio.init(APP_I2S_DEFAULT_SAMPLE_RATE)) {
+                ESP_LOGE(TAG, "TWS audio adapter init failed!");
+            } else {
+                // Set up TWS post-processing callback for primary
+                if (tws.isPrimary()) {
+                    g_pipeline.setTwsPostProcessCallback([](int32_t* samples, uint32_t frames) {
+                        TwsAudioAdapter::getInstance().processForTws(samples, frames);
+                    });
+                }
+                
+                // Start pairing if no peer MAC configured
+                #ifdef CONFIG_TWS_PEER_MAC
+                const char* peerMacStr = CONFIG_TWS_PEER_MAC;
+                if (peerMacStr && strlen(peerMacStr) > 0) {
+                    // Parse MAC address string "AA:BB:CC:DD:EE:FF"
+                    uint8_t peerMac[6];
+                    if (sscanf(peerMacStr, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+                               &peerMac[0], &peerMac[1], &peerMac[2],
+                               &peerMac[3], &peerMac[4], &peerMac[5]) == 6) {
+                        ESP_LOGI(TAG, "Using configured peer MAC: %s", peerMacStr);
+                        tws.setPeerMac(peerMac);
+                    } else {
+                        ESP_LOGW(TAG, "Invalid peer MAC format, starting pairing");
+                        tws.startPairing();
+                    }
+                } else {
+                    ESP_LOGI(TAG, "No peer MAC configured, starting pairing");
+                    tws.startPairing();
+                }
+                #else
+                ESP_LOGI(TAG, "Starting TWS pairing...");
+                tws.startPairing();
+                #endif
+            }
+        }
+    }
+    #endif
+
     // GPIO init (buttons + LED)
     gpio_config_t io = {};
     io.intr_type = GPIO_INTR_DISABLE;
@@ -1517,6 +1622,10 @@ extern "C" void app_main(void) {
     // This ensures the correct status is sent when a client connects
     g_ble.setSoundStatus(g_sound.getStatus());
 
+    // ========================================================================
+    // A2DP Initialization - Skip for TWS Secondary (receives via ESP-NOW)
+    // ========================================================================
+    #if !APP_TWS_ENABLED || APP_TWS_ROLE != 2
     // Start A2DP
     g_a2dp.set_output_active(false);
     g_a2dp.set_stream_reader(onStreamData, false);
@@ -1564,14 +1673,24 @@ extern "C" void app_main(void) {
     // ESP_BT_NON_DISCOVERABLE = connectable (for reconnect) but not visible for new pairings
     g_a2dp.set_discoverability(ESP_BT_NON_DISCOVERABLE);
     ESP_LOGI(TAG, "A2DP started as '%s' - discoverability DISABLED (reconnect only)", deviceName.c_str());
+    #else
+    // TWS Secondary mode - no A2DP needed, audio comes via ESP-NOW
+    ESP_LOGI(TAG, "TWS Secondary mode - A2DP disabled, audio via ESP-NOW");
+    #endif  // A2DP initialization
 
     // Log memory status before starting tasks
     ESP_LOGI(TAG, "Free heap: internal=%u KB, PSRAM=%u KB",
              (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024),
              (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
 
-    // Start tasks - audio_tx at very high priority for smooth LDAC playback
+    // Start audio tasks based on TWS role
+    #if APP_TWS_ENABLED && APP_TWS_ROLE == 2
+    // TWS Secondary: Start ESP-NOW audio receive task
+    xTaskCreatePinnedToCore(twsSecondaryTask, "tws_audio", 8192, nullptr, configMAX_PRIORITIES - 2, nullptr, 1);
+    #else
+    // Normal or TWS Primary: Start A2DP audio processing task
     xTaskCreatePinnedToCore(audioTxTask, "audio_tx", 8192, nullptr, configMAX_PRIORITIES - 2, nullptr, 1);
+    #endif
     xTaskCreate(buttonsTask, "buttons", 2048, nullptr, 5, nullptr);
     xTaskCreate(beatTask, "beat", 2048, nullptr, 4, nullptr);
 
@@ -1589,7 +1708,11 @@ extern "C" void app_main(void) {
         enc.setEffectCallback(onEncoderEffectChange);
         
         // Set initial values from NVS
+        #if !APP_TWS_ENABLED || APP_TWS_ROLE != 2
         enc.setCurrentVolume((uint8_t)g_a2dp.get_volume());  // Get current volume (0-127)
+        #else
+        enc.setCurrentVolume(64);  // Default volume for TWS secondary
+        #endif
         enc.setCurrentEq(eqBass, eqMid, eqTreble);
         #ifdef CONFIG_LED_MATRIX_ENABLE
         enc.setCurrentBrightness(LedController::getInstance().getBrightness());

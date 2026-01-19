@@ -38,6 +38,7 @@
 - **aptX HD/aptX/aptX-LL** for low latency
 - **AAC** for Apple device compatibility
 - Real-time **DSP processing**
+- **TWS stereo pairing** via ESP-NOW
 
 </td>
 <td width="50%">
@@ -99,6 +100,49 @@
 | **DAC** | I2S compatible | PCM5102, MAX98357A, etc. |
 | **Encoder** | Adafruit Quad Rotary (5752) | Optional - I2C control interface |
 | **LED Matrix** | 16×16 WS2812B | Optional - SPI/DMA driven |
+
+### TWS (True Wireless Stereo) Mode
+
+The firmware supports TWS operation where two ESP32 speakers work together as a stereo pair:
+
+| Role | Function | Description |
+|:-----|:---------|:------------|
+| **Primary** | A2DP Receiver | Connects to phone, receives audio, sends one channel to Secondary |
+| **Secondary** | ESP-NOW Receiver | Receives audio from Primary via ESP-NOW, outputs the other channel |
+
+**How it works:**
+1. Primary receives stereo audio from phone via A2DP (Bluetooth)
+2. Primary plays one channel (e.g., Left) through its speaker
+3. Primary sends the other channel (e.g., Right) to Secondary via ESP-NOW (~1-3ms latency)
+4. A sync delay buffer on Primary ensures both speakers play in sync
+
+**Configuration** (via `idf.py menuconfig` → TWS Configuration):
+
+| Setting | Options | Description |
+|:--------|:--------|:------------|
+| **Enable TWS** | On/Off | Enable TWS mode |
+| **Role** | Primary/Secondary | Device role in TWS pair |
+| **Channel** | Left/Right | Which channel this device plays |
+| **Sync Delay** | 10-200ms | Buffer delay for sync (default: 50ms) |
+| **Force SBC** | On/Off | Force SBC codec for timing consistency |
+| **Peer MAC** | AA:BB:CC:DD:EE:FF | Pre-configured peer MAC (optional) |
+
+**Building TWS Firmware:**
+```bash
+# Build Primary speaker
+idf.py menuconfig   # Enable TWS → Role: Primary → Channel: Left
+idf.py build
+idf.py flash
+
+# Build Secondary speaker (on different ESP32)
+idf.py menuconfig   # Enable TWS → Role: Secondary → Channel: Right
+idf.py build
+idf.py flash
+```
+
+> ⚠️ **Note**: TWS mode requires WiFi for ESP-NOW. The ESP32 uses WiFi Station mode internally (no router connection needed).
+
+> 💡 **Tip**: For best sync, use the same sync delay on both devices and enable "Force SBC" to avoid codec timing variations.
 
 ### Quad Rotary Encoder (Adafruit 5752)
 

@@ -27,6 +27,11 @@ struct AudioBuf {
 // Callback type for checking if I2S write should be skipped
 typedef bool (*ShouldSkipWriteCallback)();
 
+// Callback type for TWS post-processing (after DSP, before I2S output)
+// Takes pointer to int32 samples (L/R interleaved), frame count
+// Can modify samples in place for channel splitting, sync delay, etc.
+typedef void (*TwsPostProcessCallback)(int32_t* samples, uint32_t frames);
+
 class AudioPipeline {
 public:
     AudioPipeline() 
@@ -39,6 +44,7 @@ public:
         , m_shortWriteCount(0)
         , m_lastProcessMs(0)
         , m_skipWriteCallback(nullptr)
+        , m_twsPostProcessCallback(nullptr)
         , m_wasSkipping(false)
     {
     }
@@ -121,6 +127,11 @@ public:
         m_skipWriteCallback = cb;
     }
 
+    // Set callback for TWS post-processing (channel split, sync delay, ESP-NOW send)
+    void setTwsPostProcessCallback(TwsPostProcessCallback cb) {
+        m_twsPostProcessCallback = cb;
+    }
+
     // Enqueue audio data from BT callback (non-blocking)
     void enqueue(const uint8_t *data, uint32_t len, uint8_t bits, uint8_t channels) {
         if (!m_audioQueue || !m_freeQueue || len == 0) return;
@@ -199,6 +210,12 @@ public:
                 process16bit(buf, frames, channels, dsp);
             } else {
                 process32bit(buf, frames, channels, dsp);
+            }
+
+            // TWS post-processing hook: channel splitting, sync delay, ESP-NOW send
+            // This is called after DSP but before I2S write
+            if (m_twsPostProcessCallback) {
+                m_twsPostProcessCallback(m_dspOut, frames);
             }
 
             if (!skipWrite) {
@@ -422,5 +439,6 @@ private:
     volatile uint32_t m_lastProcessMs;
     
     ShouldSkipWriteCallback m_skipWriteCallback;
+    TwsPostProcessCallback m_twsPostProcessCallback;
     bool m_wasSkipping;  // Track state transition for DMA clearing
 };
