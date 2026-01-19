@@ -1,10 +1,12 @@
 #pragma once
 
-// -----------------------------------------------------------
-// WS2812B LED Driver using SPI DMA
-// Alternative to RMT driver - more reliable under heavy CPU load
-// Based on: https://github.com/okhsunrog/esp_ws28xx
-// -----------------------------------------------------------
+/*
+ * led_driver_spi.h
+ *
+ * WS2812B LED driver using SPI with DMA.
+ * More reliable than RMT when you're also running Bluetooth + BLE + DSP.
+ * Based on https://github.com/okhsunrog/esp_ws28xx
+ */
 
 #include <stdint.h>
 #include <string.h>
