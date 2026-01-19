@@ -1,11 +1,12 @@
 #pragma once
 
-// -----------------------------------------------------------
-// LED Effects Engine
-// Audio-reactive effects for 16x16 WS2812B matrix
-// OPTIMIZED: No divisions - all bit shifts and multiplies
-// Uses SPI DMA driver for reliable LED output
-// -----------------------------------------------------------
+/*
+ * led_effects.h
+ *
+ * All the LED effects live here - spectrum analyzer, VU meter, fire,
+ * plasma, starfield, etc. They react to the audio in real-time.
+ * Optimized to avoid divisions (all bit shifts and multiplies).
+ */
 
 #include <stdint.h>
 #include <math.h>
