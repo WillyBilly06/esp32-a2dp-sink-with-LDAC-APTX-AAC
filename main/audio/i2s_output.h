@@ -1,9 +1,11 @@
 #pragma once
 
-// -----------------------------------------------------------
-// I2S Output - manages I2S driver for audio output
-// Always operates in 32-bit stereo mode
-// -----------------------------------------------------------
+/*
+ * i2s_output.h
+ *
+ * Handles I2S output to the DAC. Always runs in 32-bit stereo mode
+ * regardless of what the source format is.
+ */
 
 #include <stdint.h>
 #include "freertos/FreeRTOS.h"
