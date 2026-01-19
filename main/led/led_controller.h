@@ -1,10 +1,11 @@
 #pragma once
 
-// -----------------------------------------------------------
-// LED Controller
-// Manages effects, demo mode switching, and audio integration
-// Uses SPI DMA driver for reliable LED output
-// -----------------------------------------------------------
+/*
+ * led_controller.h
+ *
+ * Controls the 16x16 LED matrix. Handles effect switching, demo mode
+ * when no music is playing, and syncs with the audio for reactive effects.
+ */
 
 #include <stdint.h>
 #include "freertos/FreeRTOS.h"
