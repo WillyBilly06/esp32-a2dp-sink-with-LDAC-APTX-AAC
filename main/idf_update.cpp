@@ -1,3 +1,10 @@
+/*
+ * idf_update.cpp
+ *
+ * Implementation of the OTA update wrapper.
+ * Does all the boring flash erase/write stuff.
+ */
+
 #include "idf_update.h"
 
 #include <string.h>
