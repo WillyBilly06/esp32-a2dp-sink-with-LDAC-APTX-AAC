@@ -1,10 +1,11 @@
 #pragma once
 
-// -----------------------------------------------------------
-// LED Matrix Configuration
-// 16x16 WS2812B matrix with audio-reactive effects
-// Uses SPI DMA driver for reliable LED output
-// -----------------------------------------------------------
+/*
+ * led_config.h
+ *
+ * Configuration for the 16x16 WS2812B LED matrix.
+ * All the sizing and timing constants live here.
+ */
 
 #include "sdkconfig.h"
 
