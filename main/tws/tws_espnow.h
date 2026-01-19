@@ -1,10 +1,11 @@
 #pragma once
 
-// -----------------------------------------------------------
-// TWS (True Wireless Stereo) using ESP-NOW
-// Primary: Receives A2DP from phone, forwards audio to secondary via ESP-NOW
-// Secondary: Receives audio from primary via ESP-NOW, outputs to I2S
-// -----------------------------------------------------------
+/*
+ * tws_espnow.h
+ *
+ * True Wireless Stereo using ESP-NOW for low-latency audio sync.
+ * Primary speaker gets audio from phone, sends half to secondary.
+ */
 
 #include <stdint.h>
 #include <string.h>
