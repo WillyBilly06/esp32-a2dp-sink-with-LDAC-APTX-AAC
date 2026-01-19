@@ -1,9 +1,11 @@
 #pragma once
 
-// -----------------------------------------------------------
-// Audio Pipeline - manages audio buffer queue and DSP task
-// Decouples BT audio decode from I2S output
-// -----------------------------------------------------------
+/*
+ * audio_pipeline.h
+ *
+ * Manages the audio buffer queue between Bluetooth decode and I2S output.
+ * This decouples the two so we don't get stuttering when the decoder hiccups.
+ */
 
 #include <stdint.h>
 #include "freertos/FreeRTOS.h"
