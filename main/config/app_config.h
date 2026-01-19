@@ -1,9 +1,11 @@
 #pragma once
 
-// -----------------------------------------------------------
-// Configuration header - pulls values from Kconfig
-// All configurable parameters are centralized here
-// -----------------------------------------------------------
+/*
+ * app_config.h
+ *
+ * All the configurable parameters pulled from Kconfig.
+ * Edit via 'idf.py menuconfig' instead of changing this file.
+ */
 
 #include "sdkconfig.h"
 
