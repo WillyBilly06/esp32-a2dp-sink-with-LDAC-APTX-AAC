@@ -1,16 +1,12 @@
 #pragma once
 
-// -----------------------------------------------------------
-// WS2812B LED Driver using RMT (new driver API)
-// Based on ESP-IDF official example
-// Optimized for 16x16 matrix (256 LEDs)
-// 
-// Key features for BT+BLE+FFT stability:
-// - Mutex-protected show() prevents overlapping transmissions
-// - Single-frame transmission (no chunking)
-// - DMA disabled (ESP32 original doesn't support RMT DMA)
-// - 64-symbol RMT buffer with encoder refill via ISR
-// -----------------------------------------------------------
+/*
+ * led_driver.h
+ *
+ * WS2812B LED driver using the RMT peripheral.
+ * This is the original driver - works well but can have timing issues
+ * under heavy CPU load. Use led_driver_spi.h for more reliability.
+ */
 
 #include <stdint.h>
 #include <string.h>
