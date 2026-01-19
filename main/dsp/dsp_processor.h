@@ -1,12 +1,14 @@
 #pragma once
 
-// -----------------------------------------------------------
-// DSP Processor - handles all audio signal processing
-// - 3-band EQ (bass/mid/treble shelving)
-// - Crossover split-ear mode
-// - Bass boost
-// - Goertzel frequency analysis
-// -----------------------------------------------------------
+/*
+ * dsp_processor.h
+ *
+ * All the audio processing happens here:
+ *  - 3-band EQ (bass/mid/treble)
+ *  - Crossover filter for split-ear mode
+ *  - Bass boost
+ *  - Goertzel frequency analysis for beat detection
+ */
 
 #include <stdint.h>
 #include <math.h>
