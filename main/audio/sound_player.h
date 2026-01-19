@@ -1,10 +1,12 @@
 #pragma once
 
-// -----------------------------------------------------------
-// Sound Player - plays WAV files with dynamic resampling
-// Supports: startup, pairing, connected, max volume sounds
-// Uses linear interpolation resampler for any I2S sample rate
-// -----------------------------------------------------------
+/*
+ * sound_player.h
+ *
+ * Plays WAV sound effects (startup chime, pairing sound, etc.)
+ * Uses a simple linear interpolation resampler so we can play
+ * sounds at any sample rate regardless of I2S config.
+ */
 
 #include <stdint.h>
 #include <string.h>
