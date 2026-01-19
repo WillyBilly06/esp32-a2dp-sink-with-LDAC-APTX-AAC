@@ -1,9 +1,11 @@
 #pragma once
 
-// -----------------------------------------------------------
-// Encoder Controller - Manages Quad Rotary Encoder Breakout (5752)
-// Simple approach matching Arduino example exactly
-// -----------------------------------------------------------
+/*
+ * encoder_controller.h
+ *
+ * Talks to the Adafruit Quad Rotary Encoder breakout over I2C.
+ * We use the 4 encoders for: volume, bass, mid, and treble.
+ */
 
 #include <stdint.h>
 #include <stdlib.h>
