@@ -1,9 +1,12 @@
 #pragma once
 
-// -----------------------------------------------------------
-// Goertzel algorithm for efficient single-frequency DFT
-// Used for beat detection at 30/60/100 Hz
-// -----------------------------------------------------------
+/*
+ * goertzel.h
+ *
+ * Goertzel algorithm for efficient single-frequency DFT.
+ * We use this to detect bass frequencies (30/60/100 Hz) for beat detection
+ * without having to do a full FFT.
+ */
 
 #include <math.h>
 #include "fast_math.h"
