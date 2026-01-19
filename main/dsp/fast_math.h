@@ -1,9 +1,11 @@
 #pragma once
 
-// -----------------------------------------------------------
-// Fast math utilities for ESP32
-// Uses hardware reciprocal instruction for ~5-6x faster division
-// -----------------------------------------------------------
+/*
+ * fast_math.h
+ *
+ * Fast math tricks for ESP32. Uses the hardware reciprocal instruction
+ * which is like 5-6x faster than regular float division.
+ */
 
 #include <stdint.h>
 #include <math.h>
