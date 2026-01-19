@@ -1,18 +1,15 @@
 #pragma once
 
-/**
- * @file seesaw_encoder.h
+/*
+ * seesaw_encoder.h
+ *
+ * ESP-IDF port of Adafruit's Seesaw library.
+ * Handles I2C communication with the Quad Rotary Encoder breakout.
  * 
- * ESP-IDF port of Adafruit Seesaw library for Quad Rotary Encoder Breakout
- * Based on Adafruit_seesaw.h / Adafruit_seesaw.cpp
- * 
- * This driver uses the SAME I2C communication pattern as Arduino:
+ * Based on Adafruit_seesaw - uses the same I2C pattern:
  *   1. Write [regHigh, regLow] with STOP
- *   2. Delay (default 250µs)
+ *   2. Brief delay
  *   3. Read response with STOP
- * 
- * Product: Adafruit Quad Rotary Encoder Breakout (Product 5752)
- * Default I2C Address: 0x36 (configurable via EEPROM)
  */
 
 #include <stdint.h>
