@@ -1,8 +1,11 @@
 #pragma once
 
-// -----------------------------------------------------------
-// NVS Settings - persistent storage for device configuration
-// -----------------------------------------------------------
+/*
+ * nvs_settings.h
+ *
+ * Saves and loads user settings from NVS flash.
+ * Things like device name, EQ settings, control flags, etc.
+ */
 
 #include <string>
 #include <stdint.h>
