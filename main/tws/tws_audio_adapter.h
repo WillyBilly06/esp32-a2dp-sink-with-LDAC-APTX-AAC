@@ -1,9 +1,11 @@
 #pragma once
 
-// -----------------------------------------------------------
-// TWS Audio Adapter - Integrates TWS with AudioPipeline
-// Handles channel splitting, sync buffering, and audio forwarding
-// -----------------------------------------------------------
+/*
+ * tws_audio_adapter.h
+ *
+ * Glue between TWS and the audio pipeline.
+ * Splits channels, adds sync delay, forwards audio to partner.
+ */
 
 #include <stdint.h>
 #include <string.h>
