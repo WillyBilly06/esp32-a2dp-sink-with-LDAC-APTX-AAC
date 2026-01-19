@@ -21,6 +21,7 @@
 - [Building from Source](#️building-from-source)
 - [BLE GATT Services](#ble-gatt-services)
 - [Configuration](#configuration)
+- [WiFi OTA Recovery](#wifi-ota-recovery)
 - [Troubleshooting](#troubleshooting)
 - [Credits](#credits)
 - [License](#license)
@@ -333,6 +334,72 @@ CONFIG_BT_A2DP_LDAC_DECODER=y
 CONFIG_BT_A2DP_APTX_DECODER=y
 CONFIG_BT_A2DP_AAC_DECODER=y
 ```
+
+---
+
+## 📡 WiFi OTA Recovery
+
+The firmware includes a **WiFi-based recovery system** that can restore your device if the main firmware becomes corrupted or unbootable. This is a safety net for OTA updates gone wrong.
+
+### How It Works
+
+1. **Recovery Partition**: A small recovery firmware lives at `0x10000` (same as `ota_0`)
+2. **WiFi Provisioning**: On first boot, scan the QR code or connect to the ESP32's WiFi AP
+3. **Firmware Download**: Recovery fetches encrypted firmware from a secure URL
+4. **AES Decryption**: Firmware is decrypted using AES-256-CBC before flashing
+5. **Auto-boot**: After successful flash, the device reboots into the main firmware
+
+### Building the Recovery Firmware
+
+```bash
+# Navigate to recovery folder
+cd recovery
+
+# Configure WiFi credentials (optional - can also use provisioning)
+idf.py menuconfig
+# → Component config → Recovery Configuration
+
+# Build recovery firmware
+idf.py build
+
+# Flash recovery to the device
+idf.py -p COM10 flash
+```
+
+### Encrypting Firmware for OTA
+
+The `tools/encrypt_firmware.py` script encrypts your firmware for secure distribution:
+
+```bash
+# Generate a new AES key (do this once, save it securely!)
+python tools/encrypt_firmware.py --generate-key
+
+# Encrypt a firmware binary
+python tools/encrypt_firmware.py build/app-template.bin --version 1.0.0
+```
+
+This creates:
+- `ota_releases/app-template_v1.0.0.bin.enc` - Encrypted firmware
+- `ota_releases/latest.txt` - Version info file
+
+> ⚠️ **Important**: The AES key in `encrypt_firmware.py` must match the key in `recovery/main/recovery_main.cpp`. Keep your key secret!
+
+### GPIO Assignments (Recovery Mode)
+
+| GPIO | Function | Notes |
+|:-----|:---------|:------|
+| GPIO 2 | Status LED | Built-in LED on most boards |
+| GPIO 23 | I2C SDA | Shared with main firmware |
+| GPIO 22 | I2C SCL | Shared with main firmware |
+
+### LED Status Indicators
+
+| Pattern | Meaning |
+|:--------|:--------|
+| Slow blink (1s) | Waiting for WiFi provisioning |
+| Fast blink (200ms) | Connected, downloading firmware |
+| Solid ON | Flashing firmware |
+| 3 quick blinks | Success, rebooting |
 
 ---
 
