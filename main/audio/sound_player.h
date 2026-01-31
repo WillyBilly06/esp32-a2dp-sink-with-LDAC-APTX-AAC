@@ -1,12 +1,14 @@
 #pragma once
 
-/*
- * sound_player.h
- *
- * Plays WAV sound effects (startup chime, pairing sound, etc.)
- * Uses a simple linear interpolation resampler so we can play
- * sounds at any sample rate regardless of I2S config.
- */
+// -----------------------------------------------------------
+// Sound Player - plays WAV files with dynamic resampling
+// Supports: startup, pairing, connected, max volume sounds
+// Uses linear interpolation resampler for any I2S sample rate
+// 
+// Two playback modes:
+// - EXCLUSIVE: Sound replaces BT audio (writes directly to I2S)
+// - OVERLAY: Sound is mixed with BT audio via OverlayMixer
+// -----------------------------------------------------------
 
 #include <stdint.h>
 #include <string.h>
@@ -16,7 +18,9 @@
 #include "freertos/semphr.h"
 #include "esp_log.h"
 #include "esp_spiffs.h"
+#include "esp_heap_caps.h"
 #include "../config/app_config.h"
+#include "../dsp/fast_math.h"
 
 // -----------------------------------------------------------
 // Dynamic Audio Resampler (linear interpolation)
@@ -44,7 +48,7 @@ static inline void resampler_init(AudioResampler* r,
                                    uint32_t inputRate,
                                    uint32_t outputRate,
                                    bool stereo) {
-    r->ratio = (float)inputRate / (float)outputRate;
+    r->ratio = (float)inputRate * fast_recipsf2((float)outputRate);
     r->pos = 0.0f;
     r->lastLeft = 0;
     r->lastRight = 0;
@@ -117,7 +121,7 @@ static inline size_t resample_s16_to_s32_stereo(
         
         // Apply fade-in envelope to eliminate pop at start
         if (r->fadeInRemaining > 0) {
-            float fadeGain = 1.0f - ((float)r->fadeInRemaining / (float)r->fadeInFrames);
+            float fadeGain = 1.0f - ((float)r->fadeInRemaining * fast_recipsf2((float)r->fadeInFrames));
             sampleL *= fadeGain;
             sampleR *= fadeGain;
             r->fadeInRemaining--;
@@ -243,6 +247,19 @@ public:
             return false;
         }
         
+        // Pre-allocate task stack in internal RAM while we have plenty available
+        // This avoids task creation failures later when BT consumes internal RAM
+        if (!m_taskStack) {
+            m_taskStack = (StackType_t*)heap_caps_malloc(TASK_STACK_SIZE * sizeof(StackType_t), 
+                                                          MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+            if (!m_taskStack) {
+                ESP_LOGE(TAG, "Failed to pre-allocate task stack from internal RAM");
+                return false;
+            }
+            ESP_LOGI(TAG, "Pre-allocated task stack: %u bytes in internal RAM", 
+                     (unsigned)(TASK_STACK_SIZE * sizeof(StackType_t)));
+        }
+        
         // Check which sound files exist
         updateSoundStatus();
         
@@ -317,14 +334,48 @@ public:
             return true;
         }
         
+        // If a previous task exists, wait for it to fully clean up
+        if (m_playbackTaskHandle != nullptr) {
+            ESP_LOGW(TAG, "Waiting for previous playback task to finish");
+            uint32_t waitStart = millis32();
+            while (m_playbackTaskHandle != nullptr && (millis32() - waitStart) < 500) {
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
+            if (m_playbackTaskHandle != nullptr) {
+                ESP_LOGE(TAG, "Previous task did not finish, aborting");
+                return false;
+            }
+        }
+        
         // Start playback
         m_currentSound = type;
         m_playMode = mode;
         m_playing = true;
         m_stopRequested = false;
         
-        // Create playback task
-        xTaskCreate(playbackTask, "sound_play", 4096, this, 5, &m_playbackTaskHandle);
+        // Log heap before task creation
+        ESP_LOGI(TAG, "Creating playback task, free heap: internal=%u, PSRAM=%u",
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+        
+        // Use pre-allocated internal RAM stack with static task creation
+        // This avoids dynamic allocation when internal RAM is fragmented
+        if (!m_taskStack) {
+            ESP_LOGE(TAG, "Task stack not pre-allocated!");
+            m_playing = false;
+            return false;
+        }
+        
+        m_playbackTaskHandle = xTaskCreateStaticPinnedToCore(
+            playbackTask, "sound_play", TASK_STACK_SIZE, this, 5,
+            m_taskStack, &m_taskTCB, 0);  // Core 0, away from BT on core 1
+        
+        if (!m_playbackTaskHandle) {
+            ESP_LOGE(TAG, "Failed to create playback task (static), free internal=%u",
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+            m_playing = false;
+            return false;
+        }
         
         ESP_LOGI(TAG, "Playing sound: %d (mode=%d)", type, mode);
         return true;
@@ -451,7 +502,11 @@ private:
     }
     
     void doPlayback() {
+        ESP_LOGI(TAG, ">>> doPlayback task started");
+        
         xSemaphoreTake(m_mutex, portMAX_DELAY);
+        
+        ESP_LOGI(TAG, ">>> mutex acquired, opening file");
         
         const char* path = SOUND_PATHS[m_currentSound];
         FILE* f = fopen(path, "rb");
@@ -519,14 +574,24 @@ private:
         // Use max possible rate (96kHz) for buffer sizing to handle any rate change
         const size_t maxOutputFrames = (inputChunkFrames * 96000 / header.sampleRate) + 16;
         
-        // Allocate buffers - prefer PSRAM for larger buffers
+        // Allocate buffers - prefer PSRAM to avoid exhausting internal RAM
+        // Internal RAM is needed for BLE/BT operations
         uint8_t* inputRaw = (uint8_t*)heap_caps_malloc(inputChunkFrames * inputBytesPerFrame, 
-                                                        MALLOC_CAP_8BIT);
+                                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!inputRaw) {
+            inputRaw = (uint8_t*)heap_caps_malloc(inputChunkFrames * inputBytesPerFrame, MALLOC_CAP_8BIT);
+        }
         int16_t* inputS16 = (int16_t*)heap_caps_malloc(inputChunkSamples * sizeof(int16_t), 
-                                                        MALLOC_CAP_8BIT);
+                                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!inputS16) {
+            inputS16 = (int16_t*)heap_caps_malloc(inputChunkSamples * sizeof(int16_t), MALLOC_CAP_8BIT);
+        }
         // Output buffer doesn't need DMA capability - I2S driver copies from it
         int32_t* outputS32 = (int32_t*)heap_caps_malloc(maxOutputFrames * 2 * sizeof(int32_t), 
-                                                         MALLOC_CAP_8BIT);
+                                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!outputS32) {
+            outputS32 = (int32_t*)heap_caps_malloc(maxOutputFrames * 2 * sizeof(int32_t), MALLOC_CAP_8BIT);
+        }
         
         if (!inputRaw || !inputS16 || !outputS32) {
             ESP_LOGE(TAG, "Failed to allocate playback buffers (in=%u, out=%u bytes)", 
@@ -546,8 +611,18 @@ private:
         // Streaming playback loop
         size_t totalDataBytes = chunkSize;
         size_t bytesRead = 0;
+        uint32_t playbackStartTime = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        uint32_t maxPlaybackTimeMs = 10000;  // Maximum 10 seconds for any sound
+        uint32_t consecutiveWriteFailures = 0;
+        const uint32_t maxConsecutiveFailures = 20;  // Abort after 20 consecutive I2S write failures
         
         while (bytesRead < totalDataBytes && !m_stopRequested) {
+            // Check for timeout to prevent infinite loops
+            uint32_t elapsed = (xTaskGetTickCount() * portTICK_PERIOD_MS) - playbackStartTime;
+            if (elapsed > maxPlaybackTimeMs) {
+                ESP_LOGW(TAG, "Sound playback timeout after %u ms, aborting", elapsed);
+                break;
+            }
             // Check if sample rate changed mid-playback
             if (m_sampleRateChanged) {
                 uint32_t newRate = m_targetSampleRate;
@@ -595,16 +670,33 @@ private:
                 maxOutputFrames
             );
             
-            // Write to I2S
-            if (m_playMode == SOUND_MODE_EXCLUSIVE && m_i2sWriteFunc && outputFrames > 0) {
-                m_i2sWriteFunc((uint8_t*)outputS32, outputFrames * 2 * sizeof(int32_t));
-            }
-            
-            // For overlay mode, copy to shared buffer (simplified - overlay still uses old method)
-            if (m_playMode == SOUND_MODE_OVERLAY) {
-                // Overlay mode would need getMixSamples to pull from a ring buffer
-                // For now, just delay proportionally
-                vTaskDelay(pdMS_TO_TICKS(inputFrames * 1000 / header.sampleRate));
+            // Output samples
+            if (outputFrames > 0) {
+                if (m_playMode == SOUND_MODE_OVERLAY && m_overlayPushFunc) {
+                    // Push to overlay mixer for mixing with BT audio in DSP
+                    m_overlayPushFunc(outputS32, outputFrames);
+                    // Rate-limit to match real-time playback
+                    // Calculate how many ms of audio we just pushed and delay accordingly
+                    // This prevents buffer overflow and ensures audio plays at correct speed
+                    uint32_t audioMs = (outputFrames * 1000) / currentOutputRate;
+                    if (audioMs < 1) audioMs = 1;
+                    // Delay slightly less than the audio duration to stay ahead of consumption
+                    vTaskDelay(pdMS_TO_TICKS(audioMs > 2 ? audioMs - 1 : audioMs));
+                } else if (m_playMode == SOUND_MODE_EXCLUSIVE && m_i2sWriteFunc) {
+                    // Write directly to I2S (exclusive mode)
+                    size_t written = m_i2sWriteFunc((uint8_t*)outputS32, outputFrames * 2 * sizeof(int32_t));
+                    if (written == 0) {
+                        consecutiveWriteFailures++;
+                        if (consecutiveWriteFailures >= maxConsecutiveFailures) {
+                            ESP_LOGW(TAG, "Too many I2S write failures (%u), aborting playback", consecutiveWriteFailures);
+                            break;
+                        }
+                        // I2S might be reconfiguring, wait a bit
+                        vTaskDelay(pdMS_TO_TICKS(10));
+                    } else {
+                        consecutiveWriteFailures = 0;  // Reset on successful write
+                    }
+                }
             }
             
             // Small yield to prevent watchdog
@@ -617,19 +709,27 @@ private:
         heap_caps_free(outputS32);
         fclose(f);
         
+        ESP_LOGI(TAG, "Playback complete");
+        
+        // Check for pending sound BEFORE clearing state
+        SoundType pending = (SoundType)m_pendingSound;
+        SoundPlayMode pendingMode = m_pendingMode;
+        m_pendingSound = -1;
+        
+        // Clear state - important: do this BEFORE calling play() to avoid
+        // the "previous task still running" check blocking us
         m_playing = false;
         m_playbackTaskHandle = nullptr;
         
-        // Check for pending sound
-        if (m_pendingSound >= 0) {
-            SoundType pending = (SoundType)m_pendingSound;
-            SoundPlayMode pendingMode = m_pendingMode;
-            m_pendingSound = -1;
+        // Now play the pending sound (this creates a new task)
+        if (pending >= 0 && pending < SOUND_TYPE_COUNT) {
+            ESP_LOGI(TAG, "Playing queued sound: %d", pending);
             play(pending, pendingMode);
         }
-        
-        ESP_LOGI(TAG, "Playback complete");
     }
+    
+    // Task stack size - allocated once during init for reuse
+    static constexpr size_t TASK_STACK_SIZE = 4096;
     
     bool m_initialized = false;
     bool m_muted = false;
@@ -638,6 +738,10 @@ private:
     
     SemaphoreHandle_t m_mutex = nullptr;
     TaskHandle_t m_playbackTaskHandle = nullptr;
+    
+    // Pre-allocated task stack and TCB for static task creation
+    StackType_t* m_taskStack = nullptr;
+    StaticTask_t m_taskTCB;
     
     volatile bool m_playing = false;
     volatile bool m_stopRequested = false;
@@ -649,11 +753,20 @@ private:
     SoundPlayMode m_pendingMode = SOUND_MODE_EXCLUSIVE;
     
 public:
-    // I2S write function pointer (set by main)
+    // I2S write function pointer (set by main for exclusive mode)
     using I2SWriteFunc = size_t(*)(const uint8_t*, size_t);
     I2SWriteFunc m_i2sWriteFunc = nullptr;
     
     void setI2SWriteFunc(I2SWriteFunc func) {
         m_i2sWriteFunc = func;
+    }
+    
+    // Overlay push function pointer (set by main for overlay mode)
+    // Pushes resampled stereo samples to OverlayMixer for mixing with BT audio
+    using OverlayPushFunc = void(*)(const int32_t* stereoSamples, size_t frames);
+    OverlayPushFunc m_overlayPushFunc = nullptr;
+    
+    void setOverlayPushFunc(OverlayPushFunc func) {
+        m_overlayPushFunc = func;
     }
 };
