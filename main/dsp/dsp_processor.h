@@ -1,14 +1,12 @@
 #pragma once
 
-/*
- * dsp_processor.h
- *
- * All the audio processing happens here:
- *  - 3-band EQ (bass/mid/treble)
- *  - Crossover filter for split-ear mode
- *  - Bass boost
- *  - Goertzel frequency analysis for beat detection
- */
+// -----------------------------------------------------------
+// DSP Processor - handles all audio signal processing
+// - 3-band EQ (bass/mid/treble shelving)
+// - Crossover split-ear mode
+// - Bass boost
+// - Goertzel frequency analysis
+// -----------------------------------------------------------
 
 #include <stdint.h>
 #include <math.h>
@@ -42,11 +40,39 @@ public:
     void setChannelFlip(bool enable) { m_channelFlipEnabled = enable; }
     void setBypass(bool enable) { m_bypassEnabled = enable; }
     void setAnalysisEnabled(bool enable) { m_analysisEnabled = enable; }
+    void set3DSound(bool enable) { m_3dSoundEnabled = enable; }
 
     bool isBassBoostEnabled() const { return m_bassBoostEnabled; }
     bool isChannelFlipEnabled() const { return m_channelFlipEnabled; }
     bool isBypassEnabled() const { return m_bypassEnabled; }
     bool isAnalysisEnabled() const { return m_analysisEnabled; }
+    bool is3DSoundEnabled() const { return m_3dSoundEnabled; }
+
+    // Volume-based bass compensation (0-127 A2DP range)
+    // As volume decreases, bass boost increases (max +3dB at 0% volume)
+    void setVolume(uint8_t volume) {
+        m_volume = volume;
+        updateBassCompensation();
+    }
+    uint8_t getVolume() const { return m_volume; }
+    float getBassCompensationDB() const { return m_bassCompensationDB; }
+    
+    // LED audio boost factor - increases as volume decreases for better reactivity
+    // Returns a linear gain multiplier to compensate for low volume
+    // At 1% volume we need ~100x boost to get similar LED reactivity as 100% volume
+    float getLedAudioBoost() const {
+        // Volume 0-127 maps to 0-100%
+        // At 100% volume: boost = 1.0 (no boost)
+        // At 1% volume: boost = ~100.0 (100x boost for full LED visibility)
+        // Use exponential curve for smoother transition at low volumes
+        float volumePct = (float)m_volume * fast_recipsf2(127.0f);
+        if (volumePct < 0.01f) volumePct = 0.01f;  // Clamp minimum to 1%
+        
+        // Inverse relationship: boost = 1/volumePct, clamped to 100x max
+        float boost = fast_recipsf2(volumePct);
+        if (boost > 100.0f) boost = 100.0f;
+        return boost;
+    }
 
     // Process a single stereo sample (in-place)
     void processStereo(float &L, float &R);
@@ -110,6 +136,199 @@ private:
     };
     
     SoftClipper m_clipper;
+
+    // -----------------------------------------------------------
+    // 3D Sound Crossfeed Processor
+    // Creates a more spacious, speaker-like sound from headphones/stereo
+    // by blending a delayed, filtered version of each channel into the other
+    // -----------------------------------------------------------
+    // ============================================================
+    // STAGE PRESENCE 3D PROCESSOR
+    // Creates a concert/stage soundstage experience:
+    // - Bass stays TIGHT and CENTERED (punchy, not muddy)
+    // - Mids/Vocals/Instruments spread WIDE like a real stage
+    // - Early reflections simulate room acoustics
+    // - Creates depth - sounds like performers are IN FRONT of you
+    // ============================================================
+    struct Immersive3DProcessor {
+        static constexpr int MAX_DELAY = 256;  // Power of 2 for fast wrap
+        
+        // === STAGE EFFECT PARAMETERS ===
+        static constexpr float BASS_CROSSOVER = 180.0f;   // Hz - keep bass below this centered
+        static constexpr float MID_WIDTH = 2.2f;          // Dramatic widening for mids
+        static constexpr float HIGH_WIDTH = 2.5f;         // Even wider for highs/presence
+        
+        // Early reflections (simulates room/stage)
+        static constexpr float REFLECT1_MS = 8.0f;        // First reflection
+        static constexpr float REFLECT2_MS = 15.0f;       // Second reflection
+        static constexpr float REFLECT3_MS = 23.0f;       // Third reflection
+        static constexpr float REFLECT_GAIN1 = 0.25f;     // Strong first reflection
+        static constexpr float REFLECT_GAIN2 = 0.18f;     // Medium second
+        static constexpr float REFLECT_GAIN3 = 0.12f;     // Subtle third
+        
+        // Depth enhancement
+        static constexpr float DEPTH_DELAY_MS = 4.0f;     // Creates front-stage depth
+        static constexpr float DEPTH_GAIN = 0.35f;
+        
+        // Delay buffers for reflections
+        float delayL[MAX_DELAY];
+        float delayR[MAX_DELAY];
+        int writeIdx = 0;
+        int reflect1Samples = 0;
+        int reflect2Samples = 0;
+        int reflect3Samples = 0;
+        int depthSamples = 0;
+        
+        // Bass extraction filter (LP for bass, HP for mids/highs)
+        float bassLpCoef = 0;
+        float bassStateL = 0, bassStateR = 0;
+        
+        // Mid/high presence filter (emphasize 2-6kHz for clarity)
+        float presenceHpCoef = 0;
+        float presenceStateL = 0, presenceStateR = 0;
+        
+        // All-pass for externalization (phase decorrelation)
+        float apCoef1 = 0.6f, apCoef2 = -0.4f;
+        float apState1L = 0, apState1R = 0;
+        float apState2L = 0, apState2R = 0;
+        
+        // Soft saturation for warmth
+        inline float softClip(float x) {
+            if (x > 1.0f) return 1.0f;
+            if (x < -1.0f) return -1.0f;
+            return x * (1.5f - 0.5f * x * x);
+        }
+        
+        void init(float sampleRate) {
+            // Clear delay buffers
+            for (int i = 0; i < MAX_DELAY; i++) {
+                delayL[i] = 0.0f;
+                delayR[i] = 0.0f;
+            }
+            writeIdx = 0;
+            bassStateL = bassStateR = 0;
+            presenceStateL = presenceStateR = 0;
+            apState1L = apState1R = 0;
+            apState2L = apState2R = 0;
+            
+            // Calculate reflection delay samples
+            reflect1Samples = (int)(sampleRate * REFLECT1_MS * 0.001f);
+            reflect2Samples = (int)(sampleRate * REFLECT2_MS * 0.001f);
+            reflect3Samples = (int)(sampleRate * REFLECT3_MS * 0.001f);
+            depthSamples = (int)(sampleRate * DEPTH_DELAY_MS * 0.001f);
+            
+            // Clamp to buffer size
+            if (reflect1Samples >= MAX_DELAY) reflect1Samples = MAX_DELAY - 1;
+            if (reflect2Samples >= MAX_DELAY) reflect2Samples = MAX_DELAY - 1;
+            if (reflect3Samples >= MAX_DELAY) reflect3Samples = MAX_DELAY - 1;
+            if (depthSamples >= MAX_DELAY) depthSamples = MAX_DELAY - 1;
+            
+            // Bass LP filter coefficient (~180Hz crossover)
+            float wc = 2.0f * DSP_PI_F * BASS_CROSSOVER;
+            bassLpCoef = wc * fast_recipsf2(wc + sampleRate);
+            
+            // Presence HP filter (~300Hz to separate from bass)
+            float wcHp = 2.0f * DSP_PI_F * 300.0f;
+            presenceHpCoef = sampleRate * fast_recipsf2(wcHp + sampleRate);
+        }
+        
+        inline void process(float &L, float &R) {
+            // ========== 1. BASS/MID SEPARATION ==========
+            // Extract bass (keep centered) and mids/highs (widen)
+            bassStateL += bassLpCoef * (L - bassStateL);
+            bassStateR += bassLpCoef * (R - bassStateR);
+            
+            float bassL = bassStateL;
+            float bassR = bassStateR;
+            float bassMono = (bassL + bassR) * 0.5f;  // Center the bass!
+            
+            // Mids/highs = original minus bass
+            float midHighL = L - bassL;
+            float midHighR = R - bassR;
+            
+            // ========== 2. DRAMATIC MID/HIGH WIDENING ==========
+            // M-S processing on mids/highs only (not bass!)
+            float mid = (midHighL + midHighR) * 0.5f;
+            float side = (midHighL - midHighR) * 0.5f;
+            
+            // Progressive widening - highs wider than mids
+            // Simple approach: boost side channel significantly
+            side *= MID_WIDTH;
+            
+            // Reconstruct widened mids/highs
+            float wideL = mid + side;
+            float wideR = mid - side;
+            
+            // ========== 3. STORE IN DELAY BUFFER ==========
+            delayL[writeIdx] = wideL;
+            delayR[writeIdx] = wideR;
+            
+            // ========== 4. EARLY REFLECTIONS (Stage Acoustics) ==========
+            // Multiple short delays create sense of space/room
+            int idx1 = (writeIdx - reflect1Samples) & (MAX_DELAY - 1);
+            int idx2 = (writeIdx - reflect2Samples) & (MAX_DELAY - 1);
+            int idx3 = (writeIdx - reflect3Samples) & (MAX_DELAY - 1);
+            int depthIdx = (writeIdx - depthSamples) & (MAX_DELAY - 1);
+            
+            // Cross-channel reflections (sound bouncing around stage)
+            float ref1L = delayR[idx1] * REFLECT_GAIN1;  // From opposite side
+            float ref1R = delayL[idx1] * REFLECT_GAIN1;
+            float ref2L = delayL[idx2] * REFLECT_GAIN2;  // Same side bounce
+            float ref2R = delayR[idx2] * REFLECT_GAIN2;
+            float ref3L = delayR[idx3] * REFLECT_GAIN3;  // Cross again
+            float ref3R = delayL[idx3] * REFLECT_GAIN3;
+            
+            // Depth delay (creates front-stage positioning)
+            float depthL = delayL[depthIdx] * DEPTH_GAIN;
+            float depthR = delayR[depthIdx] * DEPTH_GAIN;
+            
+            // ========== 5. EXTERNALIZATION (Out-of-Head) ==========
+            // Cascaded all-pass filters for phase decorrelation
+            // This makes sound feel like it's OUTSIDE your head
+            float ap1OutL = apCoef1 * wideL + apState1L;
+            apState1L = wideL - apCoef1 * ap1OutL;
+            float ap1OutR = apCoef1 * wideR + apState1R;
+            apState1R = wideR - apCoef1 * ap1OutR;
+            
+            // Second stage with different coefficient
+            float ap2OutL = apCoef2 * ap1OutL + apState2L;
+            apState2L = ap1OutL - apCoef2 * ap2OutL;
+            float ap2OutR = apCoef2 * ap1OutR + apState2R;
+            apState2R = ap1OutR - apCoef2 * ap2OutR;
+            
+            // Blend original and phase-shifted for subtle effect
+            float extL = wideL * 0.5f + ap2OutL * 0.5f;
+            float extR = wideR * 0.5f + ap2OutR * 0.5f;
+            
+            // ========== 6. FINAL MIX ==========
+            // Bass: centered mono (punchy, tight)
+            // Mids/Highs: widened + reflections + depth + externalization
+            float outL = bassMono * 0.9f + extL * 0.65f + depthL + ref1L + ref2L + ref3L;
+            float outR = bassMono * 0.9f + extR * 0.65f + depthR + ref1R + ref2R + ref3R;
+            
+            // Soft clip for warmth and protection
+            L = softClip(outL);
+            R = softClip(outR);
+            
+            // Advance write index
+            writeIdx = (writeIdx + 1) & (MAX_DELAY - 1);
+        }
+        
+        void reset() {
+            for (int i = 0; i < MAX_DELAY; i++) {
+                delayL[i] = 0.0f;
+                delayR[i] = 0.0f;
+            }
+            writeIdx = 0;
+            bassStateL = bassStateR = 0;
+            presenceStateL = presenceStateR = 0;
+            apState1L = apState1R = 0;
+            apState2L = apState2R = 0;
+        }
+    };
+    
+    Immersive3DProcessor m_crossfeed;  // Keep variable name for compatibility
+
 
     // -----------------------------------------------------------
     // 3-Band Peak Meter for 30Hz, 60Hz, 100Hz display
@@ -281,6 +500,15 @@ private:
     bool m_channelFlipEnabled;
     bool m_bypassEnabled;
     bool m_analysisEnabled;
+    bool m_3dSoundEnabled;
+    
+    // Volume-based bass compensation
+    uint8_t m_volume;           // Current volume (0-127)
+    float m_bassCompensationDB; // Calculated bass boost in dB
+    Biquad m_bassCompL, m_bassCompR;  // Bass compensation filters
+
+private:
+    void updateBassCompensation();
 };
 
 // -----------------------------------------------------------
@@ -299,6 +527,9 @@ inline DSPProcessor::DSPProcessor()
     , m_channelFlipEnabled(false)
     , m_bypassEnabled(false)
     , m_analysisEnabled(true)
+    , m_3dSoundEnabled(false)
+    , m_volume(127)
+    , m_bassCompensationDB(0.0f)
 {
 }
 
@@ -309,6 +540,8 @@ inline void DSPProcessor::init(uint32_t sampleRate) {
     m_goertzel.init(m_sampleRate);
     m_clipper.init((float)m_sampleRate);
     m_peakMeter.init((float)m_sampleRate);
+    m_crossfeed.init((float)m_sampleRate);
+    updateBassCompensation();  // Initialize bass compensation filter
 }
 
 inline void DSPProcessor::setSampleRate(uint32_t sampleRate) {
@@ -316,6 +549,8 @@ inline void DSPProcessor::setSampleRate(uint32_t sampleRate) {
     m_sampleRate = sampleRate > 0 ? sampleRate : APP_I2S_DEFAULT_SR;
     updateFilters();
     updateLPAlpha();
+    updateBassCompensation();  // Re-initialize bass compensation filter for new sample rate
+    m_crossfeed.init((float)m_sampleRate);  // Re-initialize crossfeed for new sample rate
     resetAllFilters();  // Clear all filter states to prevent noise on codec switch
     m_goertzel.init(m_sampleRate);
     m_clipper.init((float)m_sampleRate);
@@ -368,10 +603,36 @@ inline void DSPProcessor::resetAllFilters() {
     m_eqTrebleR.reset();
     m_bassShelfL.reset();
     m_bassShelfR.reset();
+    m_bassCompL.reset();
+    m_bassCompR.reset();
     m_crossoverLPL.reset();
     m_crossoverHPR.reset();
+    m_crossfeed.reset();
     m_peakMeter.zero();
     m_lpState = 0.0f;
+}
+
+// Update bass compensation filter based on current volume
+// At low volumes, bass is perceived as quieter (equal loudness contour)
+// This compensates by boosting bass as volume decreases
+inline void DSPProcessor::updateBassCompensation() {
+    if (m_sampleRate == 0) return;
+    
+    // Calculate bass boost: 0dB at full volume (127), +3dB at zero volume
+    // Use exponential curve for more natural perception
+    // volumePct: 0.0 (mute) to 1.0 (max)
+    float volumePct = (float)m_volume * fast_recipsf2(127.0f);
+    
+    // Exponential curve: more boost at lower volumes
+    // boost_dB = 3.0 * (1 - volumePct)^2
+    // This gives ~0dB at 100%, ~0.75dB at 50%, ~3dB at 0%
+    float factor = 1.0f - volumePct;
+    m_bassCompensationDB = 5.0f * factor * factor;
+    
+    // Update bass compensation filters (low shelf at 100Hz)
+    float fs = (float)m_sampleRate;
+    m_bassCompL.makeLowShelf(fs, 100.0f, m_bassCompensationDB);
+    m_bassCompR.makeLowShelf(fs, 100.0f, m_bassCompensationDB);
 }
 
 inline void DSPProcessor::updateLPAlpha() {
@@ -404,6 +665,18 @@ inline void DSPProcessor::processStereo(float &L, float &R) {
         R = m_eqMidR.process(R);
         L = m_eqTrebleL.process(L);
         R = m_eqTrebleR.process(R);
+    }
+    
+    // Apply volume-based bass compensation (always active when volume < 100%)
+    // This compensates for the ear's reduced bass sensitivity at lower volumes
+    if (m_bassCompensationDB > 0.1f) {
+        L = m_bassCompL.process(L);
+        R = m_bassCompR.process(R);
+    }
+    
+    // Apply 3D sound crossfeed effect (creates wider soundstage)
+    if (m_3dSoundEnabled) {
+        m_crossfeed.process(L, R);
     }
 
     // Audio analysis (using original audio before DSP)
