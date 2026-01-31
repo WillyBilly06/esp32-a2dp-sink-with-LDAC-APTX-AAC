@@ -967,7 +967,6 @@ void BluetoothA2DPSink::app_a2d_callback(esp_a2d_cb_event_t event,
 }
 
 void BluetoothA2DPSink::audio_data_callback(const uint8_t *data, uint32_t len) {
-  ESP_LOGD(BT_AV_TAG, "%s", __func__);
 
   // swap left and right channels
   if (swap_left_right) {
