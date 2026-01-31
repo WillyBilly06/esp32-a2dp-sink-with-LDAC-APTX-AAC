@@ -1,11 +1,9 @@
 #pragma once
 
-/*
- * fast_math.h
- *
- * Fast math tricks for ESP32. Uses the hardware reciprocal instruction
- * which is like 5-6x faster than regular float division.
- */
+// -----------------------------------------------------------
+// Fast math utilities for ESP32
+// Uses hardware reciprocal instruction for ~5-6x faster division
+// -----------------------------------------------------------
 
 #include <stdint.h>
 #include <math.h>
@@ -63,6 +61,41 @@ static inline float fast_logf(float x) {
     return (float)e * 0.6931471806f + lnm;
 }
 
+// -----------------------------------------------------------
+// Fast sine approximation using Bhaskara I's formula
+// Accuracy: ~0.2% max error, very fast for audio LFOs
+// Input: radians (any value, handles wrap)
+// -----------------------------------------------------------
+static inline float fast_sinf(float x) {
+    // Wrap to [-PI, PI]
+    const float FAST_PI = 3.14159265f;
+    const float FAST_TWO_PI = 6.28318530f;
+    
+    // Fast modulo using subtraction
+    while (x > FAST_PI) x -= FAST_TWO_PI;
+    while (x < -FAST_PI) x += FAST_TWO_PI;
+    
+    // Bhaskara I approximation: sin(x) ≈ 16x(π-x) / (5π² - 4x(π-x))
+    // For x in [0, π], this gives < 0.2% error
+    // For negative x, sin(-x) = -sin(x)
+    float sign = 1.0f;
+    if (x < 0) {
+        sign = -1.0f;
+        x = -x;
+    }
+    
+    float xpi = x * (FAST_PI - x);
+    float denom = 5.0f * FAST_PI * FAST_PI - 4.0f * xpi;
+    return sign * 16.0f * xpi * fast_recipsf2(denom);
+}
+
+// -----------------------------------------------------------
+// Fast cosine using sin identity: cos(x) = sin(x + π/2)
+// -----------------------------------------------------------
+static inline float fast_cosf(float x) {
+    return fast_sinf(x + 1.57079632f);  // x + PI/2
+}
+
 // Template clamp utility
 template<typename T, typename U, typename V>
 static inline T clamp_value(U x, V lo, V hi) {
@@ -70,3 +103,4 @@ static inline T clamp_value(U x, V lo, V hi) {
     if (x > hi) return (T)hi;
     return (T)x;
 }
+

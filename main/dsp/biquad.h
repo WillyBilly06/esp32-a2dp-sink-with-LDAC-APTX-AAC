@@ -1,11 +1,9 @@
 #pragma once
 
-/*
- * biquad.h
- *
- * Biquad filter using Transposed Direct Form II.
- * Good numeric stability and sounds nice.
- */
+// -----------------------------------------------------------
+// BiQuad filter implementation
+// Transposed Direct Form II for good numeric stability
+// -----------------------------------------------------------
 
 #include <math.h>
 #include "fast_math.h"
