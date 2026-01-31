@@ -1,11 +1,9 @@
 #pragma once
 
-/*
- * encoder_controller.h
- *
- * Talks to the Adafruit Quad Rotary Encoder breakout over I2C.
- * We use the 4 encoders for: volume, bass, mid, and treble.
- */
+// -----------------------------------------------------------
+// Encoder Controller - Manages Quad Rotary Encoder Breakout (5752)
+// Simple approach matching Arduino example exactly
+// -----------------------------------------------------------
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -66,6 +64,7 @@ typedef void (*EqChangedCb)(int8_t bass, int8_t mid, int8_t treble);
 typedef void (*BrightnessChangedCb)(uint8_t brightness);
 typedef void (*PairingModeCb)();
 typedef void (*EffectChangedCb)(int effectId, bool confirmed);  // confirmed=true when selection is finalized
+typedef void (*SoundMode3DCb)(bool enabled);  // 3D sound toggle callback
 
 class EncoderController {
 public:
@@ -133,6 +132,7 @@ public:
     void setBrightnessCallback(BrightnessChangedCb cb) { m_brightnessCb = cb; }
     void setPairingModeCallback(PairingModeCb cb) { m_pairingCb = cb; }
     void setEffectCallback(EffectChangedCb cb) { m_effectCb = cb; }
+    void set3DSoundCallback(SoundMode3DCb cb) { m_3dSoundCb = cb; }
     
     // Set current values
     void setCurrentVolume(uint8_t volume) { m_volume = (volume <= VOLUME_MAX) ? volume : VOLUME_MAX; }
@@ -142,6 +142,12 @@ public:
     }
     void setCurrentEffect(int effectId) {
         m_effectId = effectId;
+    }
+    void setCurrent3DSound(bool enabled) {
+        m_3dSoundEnabled = enabled;
+    }
+    bool is3DSoundEnabled() const {
+        return m_3dSoundEnabled;
     }
     void setMaxEffect(int maxEffect) {
         m_maxEffect = maxEffect;
@@ -238,7 +244,7 @@ public:
         }
         m_lastBtnState[ENC_MID] = midBtn;
         
-        // Treble button = effect selection mode (with debounce)
+        // Treble button = effect selection mode (single click) / 3D sound toggle (double click)
         bool trebleBtnRaw = m_encoder.isButtonPressed(ENC_TREBLE);
         if (trebleBtnRaw) {
             if (m_btnDebounce[ENC_TREBLE] < DEBOUNCE_COUNT) m_btnDebounce[ENC_TREBLE]++;
@@ -246,24 +252,53 @@ public:
             m_btnDebounce[ENC_TREBLE] = 0;
         }
         bool trebleBtn = (m_btnDebounce[ENC_TREBLE] >= DEBOUNCE_COUNT);
+        
+        // Detect button press (rising edge after debounce)
         if (trebleBtn && !m_lastBtnState[ENC_TREBLE]) {
-            m_effectMode = !m_effectMode;
-            if (m_effectMode) {
-                // Enter effect selection mode - change treble encoder LED to purple
-                m_encoder.setPixelColor(ENC_TREBLE, 100, 0, 100);  // Purple = effect mode
-                m_previewEffectId = m_effectId;  // Start from current effect
-                ESP_LOGI(ENC_TAG, "Effect mode: ON (rotate treble encoder to preview, press again to confirm)");
-            } else {
-                // Exit effect mode - restore treble encoder LED to yellow
-                m_encoder.setPixelColor(ENC_TREBLE, 100, 100, 0);  // Yellow = normal
-                m_effectId = m_previewEffectId;  // Confirm the selection
-                ESP_LOGI(ENC_TAG, "Effect mode: OFF - selected effect: %d", m_effectId);
-                // Notify effect confirmed
-                if (m_effectCb) m_effectCb(m_effectId, true);
-            }
-            m_encoder.showPixels();
+            // Button just pressed - increment click count
+            m_trebleClickCount++;
+            m_trebleLastClickTime = xTaskGetTickCount();
         }
         m_lastBtnState[ENC_TREBLE] = trebleBtn;
+        
+        // Check if we should process treble clicks (after timeout)
+        if (m_trebleClickCount > 0) {
+            TickType_t elapsed = xTaskGetTickCount() - m_trebleLastClickTime;
+            if (elapsed > pdMS_TO_TICKS(MULTI_CLICK_TIMEOUT_MS)) {
+                // Process the accumulated clicks
+                if (m_trebleClickCount == 1) {
+                    // Single click: toggle effect mode
+                    m_effectMode = !m_effectMode;
+                    if (m_effectMode) {
+                        // Enter effect selection mode - change treble encoder LED to purple
+                        m_encoder.setPixelColor(ENC_TREBLE, 100, 0, 100);  // Purple = effect mode
+                        m_previewEffectId = m_effectId;  // Start from current effect
+                        ESP_LOGI(ENC_TAG, "Effect mode: ON (rotate to preview, press to confirm)");
+                    } else {
+                        // Exit effect mode - restore treble encoder LED to yellow
+                        m_encoder.setPixelColor(ENC_TREBLE, 100, 100, 0);  // Yellow = normal
+                        m_effectId = m_previewEffectId;  // Confirm the selection
+                        ESP_LOGI(ENC_TAG, "Effect mode: OFF - selected effect: %d", m_effectId);
+                        // Notify effect confirmed
+                        if (m_effectCb) m_effectCb(m_effectId, true);
+                    }
+                    m_encoder.showPixels();
+                } else if (m_trebleClickCount >= 2) {
+                    // Double click: toggle 3D sound
+                    m_3dSoundEnabled = !m_3dSoundEnabled;
+                    ESP_LOGI(ENC_TAG, "3D Sound: %s (double click)", m_3dSoundEnabled ? "ON" : "OFF");
+                    if (m_3dSoundCb) m_3dSoundCb(m_3dSoundEnabled);
+                    
+                    // Flash treble LED cyan to indicate 3D sound toggle
+                    m_encoder.setPixelColor(ENC_TREBLE, 0, 100, 100);  // Cyan flash
+                    m_encoder.showPixels();
+                    vTaskDelay(pdMS_TO_TICKS(200));
+                    m_encoder.setPixelColor(ENC_TREBLE, 100, 100, 0);  // Back to yellow
+                    m_encoder.showPixels();
+                }
+                m_trebleClickCount = 0;
+            }
+        }
         
         // ------ Check encoders (like Arduino: if (enc_positions[e] != new_position)) ------
         
@@ -424,6 +459,11 @@ private:
     uint8_t m_volClickCount = 0;
     TickType_t m_volLastClickTime = 0;
     
+    // Multi-click detection for treble button (3D sound toggle)
+    uint8_t m_trebleClickCount = 0;
+    TickType_t m_trebleLastClickTime = 0;
+    bool m_3dSoundEnabled = false;
+    
     // Current values
     uint8_t m_volume = 64;
     int8_t m_bass = 0;
@@ -440,6 +480,7 @@ private:
     BrightnessChangedCb m_brightnessCb = nullptr;
     PairingModeCb m_pairingCb = nullptr;
     EffectChangedCb m_effectCb = nullptr;
+    SoundMode3DCb m_3dSoundCb = nullptr;
 };
 
 // Encoder task - runs on core 0 to avoid interfering with audio on core 1
