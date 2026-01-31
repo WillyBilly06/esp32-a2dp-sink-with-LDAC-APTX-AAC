@@ -1,20 +1,19 @@
-/*
- * recovery_main.cpp
- * 
- * WiFi OTA Recovery firmware - lets you update the main firmware over WiFi.
- * Boots into AP mode so you can connect and configure internet access,
- * then downloads encrypted firmware from Google Drive and flashes it.
+/**
+ * @file recovery_main.cpp
+ * @brief WiFi OTA Recovery Firmware with Encrypted Streaming Updates
  * 
  * Features:
- *  - Captive portal with nice web UI
- *  - Encrypted OTA (AES-256-CBC) for security
- *  - Streams the download directly to flash (no RAM buffering needed)
- *  - On next power cycle, boots back to the main app
+ * - WiFi AP mode with captive portal for configuration
+ * - Professional web UI for WiFi setup and OTA
+ * - Encrypted OTA from Google Drive (AES-256-CBC)
+ * - Streaming download+flash (no full download required)
+ * - Automatic boot to main partition after power cycle
  */
 
 #include <cstring>
 #include <cstdlib>
 #include <cinttypes>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -42,17 +41,271 @@ extern "C" {
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
+#include "driver/gpio.h"
+#include "driver/spi_master.h"
+#include "esp_heap_caps.h"
 }
 
 static const char* TAG = "RECOVERY";
 
-// --------------------------------------------------
-// Basic config
-// --------------------------------------------------
+// ============================================================
+// LED Matrix Configuration (for recovery status display)
+// ============================================================
+#define LED_MATRIX_WIDTH    16
+#define LED_MATRIX_HEIGHT   16
+#define LED_MATRIX_COUNT    (LED_MATRIX_WIDTH * LED_MATRIX_HEIGHT)
+#define LED_GPIO_PIN        GPIO_NUM_4
+#define LED_DEFAULT_BRIGHTNESS  64
+
+// RGB structure for LED
+struct RGB {
+    uint8_t r, g, b;
+    RGB() : r(0), g(0), b(0) {}
+    RGB(uint8_t _r, uint8_t _g, uint8_t _b) : r(_r), g(_g), b(_b) {}
+    RGB scale(uint8_t brightness) const {
+        return RGB((r * brightness + 128) >> 8, (g * brightness + 128) >> 8, (b * brightness + 128) >> 8);
+    }
+};
+
+// WS2812B timing lookup table for SPI encoding
+static const uint16_t WS2812_TIMING_TABLE[16] = {
+    0x1111, 0x7111, 0x1711, 0x7711, 0x1171, 0x7171, 0x1771, 0x7771,
+    0x1117, 0x7117, 0x1717, 0x7717, 0x1177, 0x7177, 0x1777, 0x7777
+};
+
+// LED driver state
+static RGB s_led_framebuffer[LED_MATRIX_COUNT];
+static uint8_t s_led_brightness = LED_DEFAULT_BRIGHTNESS;
+static spi_device_handle_t s_led_spi = nullptr;
+static uint16_t* s_led_dma_buffer = nullptr;
+static size_t s_led_dma_buffer_size = 0;
+static bool s_led_initialized = false;
+static SemaphoreHandle_t s_led_mutex = nullptr;
+static TaskHandle_t s_led_task_handle = nullptr;
+
+// LED initialization
+static esp_err_t led_init() {
+    s_led_dma_buffer_size = (LED_MATRIX_COUNT * 12) + 20;
+    ESP_LOGI(TAG, "Initializing SPI LED driver: %d LEDs, GPIO %d", LED_MATRIX_COUNT, LED_GPIO_PIN);
+    
+    s_led_dma_buffer = (uint16_t*)heap_caps_malloc(s_led_dma_buffer_size, MALLOC_CAP_DMA);
+    if (!s_led_dma_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate LED DMA buffer");
+        return ESP_ERR_NO_MEM;
+    }
+    memset(s_led_dma_buffer, 0, s_led_dma_buffer_size);
+    
+    spi_bus_config_t buscfg = {};
+    buscfg.mosi_io_num = LED_GPIO_PIN;
+    buscfg.miso_io_num = -1;
+    buscfg.sclk_io_num = -1;
+    buscfg.quadwp_io_num = -1;
+    buscfg.quadhd_io_num = -1;
+    buscfg.max_transfer_sz = (int)s_led_dma_buffer_size;
+    
+    esp_err_t err = spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "SPI bus init failed: %s", esp_err_to_name(err));
+        heap_caps_free(s_led_dma_buffer);
+        s_led_dma_buffer = nullptr;
+        return err;
+    }
+    
+    spi_device_interface_config_t devcfg = {};
+    devcfg.mode = 0;
+    devcfg.clock_speed_hz = 3200000;
+    devcfg.spics_io_num = -1;
+    devcfg.flags = SPI_DEVICE_TXBIT_LSBFIRST;
+    devcfg.queue_size = 1;
+    
+    err = spi_bus_add_device(SPI2_HOST, &devcfg, &s_led_spi);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "SPI device add failed: %s", esp_err_to_name(err));
+        spi_bus_free(SPI2_HOST);
+        heap_caps_free(s_led_dma_buffer);
+        s_led_dma_buffer = nullptr;
+        return err;
+    }
+    
+    s_led_mutex = xSemaphoreCreateMutex();
+    s_led_initialized = true;
+    ESP_LOGI(TAG, "LED driver initialized");
+    return ESP_OK;
+}
+
+static void led_clear() {
+    for (int i = 0; i < LED_MATRIX_COUNT; i++) {
+        s_led_framebuffer[i] = RGB();
+    }
+}
+
+static void led_fill(RGB color) {
+    for (int i = 0; i < LED_MATRIX_COUNT; i++) {
+        s_led_framebuffer[i] = color;
+    }
+}
+
+static void led_set_pixel_xy(int x, int y, RGB color) {
+    if (x < 0 || x >= LED_MATRIX_WIDTH || y < 0 || y >= LED_MATRIX_HEIGHT) return;
+    int index = (y & 1) ? (y * LED_MATRIX_WIDTH + (LED_MATRIX_WIDTH - 1 - x)) : (y * LED_MATRIX_WIDTH + x);
+    s_led_framebuffer[index] = color;
+}
+
+static esp_err_t led_show() {
+    if (!s_led_initialized || !s_led_dma_buffer) return ESP_ERR_INVALID_STATE;
+    if (xSemaphoreTake(s_led_mutex, pdMS_TO_TICKS(5)) != pdTRUE) return ESP_ERR_TIMEOUT;
+    
+    int n = 0;
+    s_led_dma_buffer[n++] = 0;
+    
+    for (int i = 0; i < LED_MATRIX_COUNT; i++) {
+        RGB pixel = s_led_framebuffer[i].scale(s_led_brightness);
+        uint8_t g = pixel.g, r = pixel.r, b = pixel.b;
+        s_led_dma_buffer[n++] = WS2812_TIMING_TABLE[(g >> 4) & 0x0F];
+        s_led_dma_buffer[n++] = WS2812_TIMING_TABLE[g & 0x0F];
+        s_led_dma_buffer[n++] = WS2812_TIMING_TABLE[(r >> 4) & 0x0F];
+        s_led_dma_buffer[n++] = WS2812_TIMING_TABLE[r & 0x0F];
+        s_led_dma_buffer[n++] = WS2812_TIMING_TABLE[(b >> 4) & 0x0F];
+        s_led_dma_buffer[n++] = WS2812_TIMING_TABLE[b & 0x0F];
+    }
+    for (int i = 0; i < 5; i++) s_led_dma_buffer[n++] = 0;
+    
+    spi_transaction_t trans = {};
+    trans.length = (size_t)(n * 16);
+    trans.tx_buffer = s_led_dma_buffer;
+    esp_err_t err = spi_device_transmit(s_led_spi, &trans);
+    
+    xSemaphoreGive(s_led_mutex);
+    return err;
+}
+
+// ============================================================
+// LED Effect Patterns for Recovery Mode
+// ============================================================
+static volatile int s_led_effect_mode = 0;  // 0=idle, 1=wifi_wait, 2=downloading, 3=flashing, 4=success, 5=error
+static volatile int s_led_effect_progress = 0;  // 0-100 for progress
+
+static void led_effect_task(void* param) {
+    uint32_t frame = 0;
+    
+    while (true) {
+        frame++;
+        led_clear();
+        
+        switch (s_led_effect_mode) {
+            case 0:  // Idle - gentle purple breathing
+            {
+                int brightness = 20 + (int)(15.0f * sinf(frame * 0.05f));
+                led_fill(RGB(brightness, 0, brightness));
+                break;
+            }
+            
+            case 1:  // WiFi waiting - blue spinning circle
+            {
+                // Precomputed: PI / 180 = degrees to radians conversion
+                constexpr float kDegToRad = 3.14159f / 180.0f;  // Compile-time constant
+                int cx = LED_MATRIX_WIDTH / 2;
+                int cy = LED_MATRIX_HEIGHT / 2;
+                for (int angle = 0; angle < 360; angle += 30) {
+                    float rad = (angle + frame * 10) * kDegToRad;
+                    int x = cx + (int)(6.0f * cosf(rad));
+                    int y = cy + (int)(6.0f * sinf(rad));
+                    int fade = 255 - (angle * 200 / 360);
+                    led_set_pixel_xy(x, y, RGB(0, 0, fade > 50 ? fade : 50));
+                }
+                break;
+            }
+            
+            case 2:  // Downloading - cyan progress bar from bottom
+            {
+                int rows = (s_led_effect_progress * LED_MATRIX_HEIGHT) / 100;
+                for (int y = LED_MATRIX_HEIGHT - 1; y >= LED_MATRIX_HEIGHT - rows; y--) {
+                    for (int x = 0; x < LED_MATRIX_WIDTH; x++) {
+                        led_set_pixel_xy(x, y, RGB(0, 150, 200));
+                    }
+                }
+                // Animated top line
+                int top_y = LED_MATRIX_HEIGHT - rows - 1;
+                if (top_y >= 0 && top_y < LED_MATRIX_HEIGHT) {
+                    for (int x = 0; x < LED_MATRIX_WIDTH; x++) {
+                        int wave = (int)(127.0f * (1.0f + sinf((x + frame) * 0.5f)));
+                        led_set_pixel_xy(x, top_y, RGB(0, wave, 255));
+                    }
+                }
+                break;
+            }
+            
+            case 3:  // Flashing - orange/yellow progress bar from bottom
+            {
+                int rows = (s_led_effect_progress * LED_MATRIX_HEIGHT) / 100;
+                for (int y = LED_MATRIX_HEIGHT - 1; y >= LED_MATRIX_HEIGHT - rows; y--) {
+                    for (int x = 0; x < LED_MATRIX_WIDTH; x++) {
+                        led_set_pixel_xy(x, y, RGB(255, 100, 0));
+                    }
+                }
+                // Animated top line
+                int top_y = LED_MATRIX_HEIGHT - rows - 1;
+                if (top_y >= 0 && top_y < LED_MATRIX_HEIGHT) {
+                    for (int x = 0; x < LED_MATRIX_WIDTH; x++) {
+                        int wave = (int)(127.0f * (1.0f + sinf((x + frame) * 0.5f)));
+                        led_set_pixel_xy(x, top_y, RGB(255, wave, 0));
+                    }
+                }
+                break;
+            }
+            
+            case 4:  // Success - green checkmark animation
+            {
+                led_fill(RGB(0, 50, 0));
+                // Draw checkmark
+                int offset = (frame < 30) ? frame / 3 : 10;
+                // Short part of check
+                for (int i = 0; i < offset && i < 4; i++) {
+                    led_set_pixel_xy(4 + i, 8 + i, RGB(0, 255, 0));
+                }
+                // Long part of check
+                for (int i = 0; i < offset - 3 && i < 8; i++) {
+                    led_set_pixel_xy(7 + i, 11 - i, RGB(0, 255, 0));
+                }
+                break;
+            }
+            
+            case 5:  // Error - red X pulsing
+            {
+                int pulse = 128 + (int)(127.0f * sinf(frame * 0.2f));
+                // Draw X
+                for (int i = 0; i < 10; i++) {
+                    led_set_pixel_xy(3 + i, 3 + i, RGB(pulse, 0, 0));
+                    led_set_pixel_xy(3 + i, 12 - i, RGB(pulse, 0, 0));
+                }
+                break;
+            }
+        }
+        
+        led_show();
+        vTaskDelay(pdMS_TO_TICKS(33));  // ~30 FPS
+    }
+}
+
+static void led_set_mode(int mode) {
+    s_led_effect_mode = mode;
+}
+
+static void led_set_progress(int progress) {
+    s_led_effect_progress = progress;
+}
+
+// ============================================================
+// Configuration
+// ============================================================
 static const char* DEVICE_NAME = "ESP32-Recovery";
 static const char* AP_SSID = "ESP32-Recovery-Setup";
 static const char* AP_PASSWORD = "recovery123";  // Min 8 chars for WPA2
 static const char* RECOVERY_VERSION = "RECOVERY v2.0 (WiFi)";
+
+// Recovery button - must be held during power-on to stay in recovery
+// If not held, we boot back to the main firmware
+static const gpio_num_t RECOVERY_BUTTON_GPIO = GPIO_NUM_18;
 
 // NVS Keys for stored WiFi credentials and OTA version
 static const char* NVS_NAMESPACE = "wifi_creds";
@@ -60,14 +313,14 @@ static const char* NVS_KEY_SSID = "ssid";
 static const char* NVS_KEY_PASS = "password";
 static const char* NVS_KEY_OTA_VER = "ota_version";
 
-// --------------------------------------------------
-// Google Drive setup
-// --------------------------------------------------
-// 1. Create a folder in Google Drive for your OTA files
-// 2. Upload latest.txt (format: VERSION,FIRMWARE_FILE_ID)
-// 3. Share it as "Anyone with link" and grab the file ID from the URL
-// 4. Put that ID here:
-static const char* GDRIVE_LATEST_TXT_ID = "YOUR_LATEST_TXT_FILE_ID_HERE";
+// ============================================================
+// Google Drive Configuration
+// ============================================================
+// Upload latest.txt to Google Drive, share it, and put its FILE_ID here.
+// latest.txt contains one line: VERSION,FIRMWARE_FILE_ID
+// Example: 1.0.0,ABC123XYZ
+//
+static const char* GDRIVE_LATEST_TXT_ID = "1fHQ4qn4enJ5hXY0BJX1fTKX09guNOb2y";
 
 // Current installed firmware version (update this when building new firmware)
 static const char* CURRENT_FW_VERSION = "1.0.0";
@@ -77,26 +330,26 @@ static char s_available_version[32] = {0};
 static char s_firmware_file_id[64] = {0};
 static bool s_update_available = false;
 
-// --------------------------------------------------
-// Encryption key (AES-256)
-// --------------------------------------------------
-// IMPORTANT: Generate your own key! Don't use this placeholder.
-// Run: python tools/encrypt_firmware.py --generate-key
-// Copy the output here AND to encrypt_firmware.py (they must match!)
+// ============================================================
+// Encryption Configuration
+// ============================================================
+// AES-256 Key (32 bytes) - CHANGE THIS TO YOUR OWN SECRET KEY!
+// This key must match the one used to encrypt firmware files
+// Generate a new key with: openssl rand -hex 32
 static const uint8_t AES_KEY[32] = {
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  // <-- Replace with your key!
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    0x5A, 0x2B, 0x9C, 0x4E, 0x1F, 0x8D, 0x6A, 0x3C,
+    0x7B, 0x0E, 0x4F, 0x2D, 0x8C, 0x5A, 0x1B, 0x9E,
+    0x3D, 0x6C, 0x0F, 0x4A, 0x7E, 0x2B, 0x8D, 0x5C,
+    0x1A, 0x9F, 0x3E, 0x6B, 0x0D, 0x4C, 0x7A, 0x2E
 };
 
 // IV will be read from the first 16 bytes of encrypted firmware
 static const size_t AES_BLOCK_SIZE = 16;
 static const size_t AES_KEY_SIZE = 32;
 
-// --------------------------------------------------
-// Runtime state
-// --------------------------------------------------
+// ============================================================
+// State Management
+// ============================================================
 static EventGroupHandle_t s_wifi_event_group;
 static const int WIFI_CONNECTED_BIT = BIT0;
 static const int WIFI_FAIL_BIT = BIT1;
@@ -111,9 +364,9 @@ static char s_stored_pass[64] = {0};
 static int s_wifi_retry_count = 0;
 static const int MAX_WIFI_RETRIES = 5;
 
-// --------------------------------------------------
-// DNS server for captive portal (redirects all domains to us)
-// --------------------------------------------------
+// ============================================================
+// DNS Server for Captive Portal
+// ============================================================
 static TaskHandle_t s_dns_task = NULL;
 static bool s_dns_running = false;
 
@@ -222,9 +475,9 @@ static void stop_dns_server() {
     s_dns_task = NULL;
 }
 
-// --------------------------------------------------
-// Web UI (HTML/CSS/JS embedded as string literals)
-// --------------------------------------------------
+// ============================================================
+// HTML/CSS/JS for Web UI
+// ============================================================
 static const char* HTML_HEADER = R"rawliteral(
 <!DOCTYPE html>
 <html lang="en">
@@ -646,9 +899,9 @@ static const char* HTML_FOOTER = R"rawliteral(
 </html>
 )rawliteral";
 
-// --------------------------------------------------
-// WiFi config page HTML
-// --------------------------------------------------
+// ============================================================
+// WiFi Configuration HTML Page
+// ============================================================
 static const char* HTML_WIFI_CONFIG = R"rawliteral(
         <div class="nav-tabs">
             <div class="nav-tab active" onclick="showTab('wifi')">WiFi Setup</div>
@@ -802,9 +1055,9 @@ static const char* HTML_WIFI_CONFIG = R"rawliteral(
         </script>
 )rawliteral";
 
-// --------------------------------------------------
-// OTA update page HTML
-// --------------------------------------------------
+// ============================================================
+// OTA Update HTML Page
+// ============================================================
 static const char* HTML_OTA_PAGE = R"rawliteral(
 <div class="status-indicator %OTA_STATUS_CLASS%">
     <div class="dot"></div>
@@ -856,9 +1109,9 @@ static const char* HTML_OTA_PAGE = R"rawliteral(
 </div>
 )rawliteral";
 
-// --------------------------------------------------
-// Redirect page for captive portal detection
-// --------------------------------------------------
+// ============================================================
+// Captive Portal Detection Handler
+// ============================================================
 static const char* CAPTIVE_PORTAL_REDIRECT = R"rawliteral(
 <!DOCTYPE html>
 <html>
@@ -872,9 +1125,9 @@ static const char* CAPTIVE_PORTAL_REDIRECT = R"rawliteral(
 </html>
 )rawliteral";
 
-// --------------------------------------------------
-// NVS helpers - save/load WiFi creds
-// --------------------------------------------------
+// ============================================================
+// NVS Storage Functions
+// ============================================================
 static void loadStoredCredentials() {
     nvs_handle_t handle;
     if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) == ESP_OK) {
@@ -900,9 +1153,9 @@ static void saveCredentials(const char* ssid, const char* password) {
     }
 }
 
-// --------------------------------------------------
-// WiFi event callbacks
-// --------------------------------------------------
+// ============================================================
+// WiFi Event Handler
+// ============================================================
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                                int32_t event_id, void* event_data) {
     if (event_base == WIFI_EVENT) {
@@ -928,12 +1181,13 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         s_wifi_connected = true;
         s_wifi_retry_count = 0;
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+        led_set_mode(0);  // Idle mode (purple breathing) - connected and ready
     }
 }
 
-// --------------------------------------------------
-// WiFi setup - runs in AP+STA mode simultaneously
-// --------------------------------------------------
+// ============================================================
+// WiFi Initialization - AP+STA Mode
+// ============================================================
 static void init_wifi() {
     s_wifi_event_group = xEventGroupCreate();
     
@@ -996,9 +1250,9 @@ static bool connect_to_wifi(const char* ssid, const char* password) {
     return false;
 }
 
-// --------------------------------------------------
-// AES decryption for streaming OTA
-// --------------------------------------------------
+// ============================================================
+// AES Decryption for OTA
+// ============================================================
 struct OtaDecryptContext {
     mbedtls_aes_context aes;
     uint8_t iv[16];
@@ -1161,9 +1415,9 @@ static void ota_decrypt_abort() {
     }
 }
 
-// --------------------------------------------------
-// Version comparison (semver style)
-// --------------------------------------------------
+// ============================================================
+// Version Comparison Helper
+// ============================================================
 static int compare_versions(const char* v1, const char* v2) {
     // Compare semantic versions (e.g., "1.2.3" vs "1.2.4")
     int major1 = 0, minor1 = 0, patch1 = 0;
@@ -1177,9 +1431,9 @@ static int compare_versions(const char* v1, const char* v2) {
     return patch1 - patch2;
 }
 
-// --------------------------------------------------
-// Simple JSON parsing (just what we need)
-// --------------------------------------------------
+// ============================================================
+// Simple JSON Parser Helpers
+// ============================================================
 static bool json_get_string(const char* json, const char* key, char* value, size_t value_len) {
     // Find "key":"value" pattern
     char search[64];
@@ -1209,9 +1463,9 @@ static bool json_get_string(const char* json, const char* key, char* value, size
     return i > 0;
 }
 
-// --------------------------------------------------
-// HTTP download helper (handles Google Drive redirects)
-// --------------------------------------------------
+// ============================================================
+// HTTP Helper - Download text content (with redirect following)
+// ============================================================
 static bool http_download_text(const char* url, char* buffer, size_t buffer_size) {
     esp_http_client_config_t config = {};
     config.url = url;
@@ -1311,9 +1565,9 @@ static bool http_download_text(const char* url, char* buffer, size_t buffer_size
     return total_read > 0;
 }
 
-// --------------------------------------------------
-// Check Google Drive for available updates
-// --------------------------------------------------
+// ============================================================
+// Check for OTA Updates from Google Drive Folder
+// ============================================================
 static bool check_for_updates() {
     if (strlen(GDRIVE_LATEST_TXT_ID) == 0) {
         ESP_LOGE(TAG, "Google Drive latest.txt ID not configured");
@@ -1419,17 +1673,20 @@ static bool check_for_updates() {
 }
 
 
-// --------------------------------------------------
-// OTA download task (runs in background)
-// --------------------------------------------------
+// ============================================================
+// OTA Download Task
+// ============================================================
 static void ota_task(void* param) {
     s_ota_in_progress = true;
     s_ota_progress = 0;
     snprintf(s_ota_status, sizeof(s_ota_status), "Checking for updates...");
+    led_set_mode(2);  // Downloading mode (cyan)
+    led_set_progress(0);
     
     // First check for updates from Google Drive
     if (strlen(GDRIVE_LATEST_TXT_ID) == 0) {
         snprintf(s_ota_status, sizeof(s_ota_status), "Error: Google Drive not configured");
+        led_set_mode(5);  // Error mode
         s_ota_in_progress = false;
         vTaskDelete(NULL);
         return;
@@ -1438,6 +1695,7 @@ static void ota_task(void* param) {
     // Check for available updates
     if (!check_for_updates()) {
         ESP_LOGE(TAG, "check_for_updates() failed - aborting OTA");
+        led_set_mode(5);  // Error mode
         s_ota_in_progress = false;
         vTaskDelete(NULL);
         return;
@@ -1447,6 +1705,7 @@ static void ota_task(void* param) {
     if (strlen(s_firmware_file_id) == 0) {
         ESP_LOGE(TAG, "No firmware file ID - aborting OTA");
         snprintf(s_ota_status, sizeof(s_ota_status), "Error: No firmware file available");
+        led_set_mode(5);  // Error mode
         s_ota_in_progress = false;
         vTaskDelete(NULL);
         return;
@@ -1636,6 +1895,8 @@ static void ota_task(void* param) {
             s_ota_progress = (int)((int64_t)total_read * 100 / (2 * 1024 * 1024));
             if (s_ota_progress > 99) s_ota_progress = 99;
         }
+        led_set_mode(3);  // Flashing mode (orange)
+        led_set_progress(s_ota_progress);
         snprintf(s_ota_status, sizeof(s_ota_status), "Downloading & flashing: %d%% (%d KB)", s_ota_progress, total_read / 1024);
     }
     
@@ -1651,6 +1912,8 @@ static void ota_task(void* param) {
         ESP_LOGI(TAG, "========================================");
         snprintf(s_ota_status, sizeof(s_ota_status), "Update complete! Restarting...");
         s_ota_progress = 100;
+        led_set_mode(4);  // Success mode (green checkmark)
+        led_set_progress(100);
         vTaskDelay(pdMS_TO_TICKS(2000));
         esp_restart();
     } else {
@@ -1663,15 +1926,16 @@ static void ota_task(void* param) {
         ESP_LOGE(TAG, "========================================");
         ota_decrypt_abort();
         snprintf(s_ota_status, sizeof(s_ota_status), "Error: Update failed");
+        led_set_mode(5);  // Error mode (red X)
     }
     
     s_ota_in_progress = false;
     vTaskDelete(NULL);
 }
 
-// --------------------------------------------------
-// HTTP request handlers for the web UI
-// --------------------------------------------------
+// ============================================================
+// HTTP Request Handlers
+// ============================================================
 static std::string replaceAll(std::string str, const std::string& from, const std::string& to) {
     size_t pos = 0;
     while ((pos = str.find(from, pos)) != std::string::npos) {
@@ -1871,9 +2135,9 @@ static esp_err_t handle_ota_status(httpd_req_t* req) {
     return ESP_OK;
 }
 
-// --------------------------------------------------
-// Web server setup
-// --------------------------------------------------
+// ============================================================
+// HTTP Server Initialization
+// ============================================================
 static void start_webserver() {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_uri_handlers = 12;
@@ -1923,14 +2187,70 @@ static void start_webserver() {
     }
 }
 
-// --------------------------------------------------
-// Entry point
-// --------------------------------------------------
+// ============================================================
+// Main
+// ============================================================
 extern "C" void app_main(void) {
+    // ----------------------------------------------------------------
+    // Boot check: Only stay in recovery if GPIO 18 is held
+    // Otherwise, return to main firmware partition
+    // ----------------------------------------------------------------
+    gpio_config_t btn_config = {
+        .pin_bit_mask = (1ULL << RECOVERY_BUTTON_GPIO),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&btn_config);
+    
+    // Small delay for GPIO to stabilize
+    vTaskDelay(pdMS_TO_TICKS(100));
+    
+    // Check if recovery button is being held (active LOW)
+    bool button_held = (gpio_get_level(RECOVERY_BUTTON_GPIO) == 0);
+    
+    if (!button_held) {
+        ESP_LOGW(TAG, "Recovery button NOT held - returning to main firmware");
+        
+        // Find the main app partition (try ota_0 first, then ota_1)
+        const esp_partition_t* main_app = esp_partition_find_first(
+            ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
+        
+        if (!main_app) {
+            main_app = esp_partition_find_first(
+                ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_1, NULL);
+        }
+        
+        if (main_app) {
+            ESP_LOGI(TAG, "Setting boot partition to: %s @ 0x%08" PRIx32,
+                     main_app->label, (uint32_t)main_app->address);
+            
+            esp_err_t err = esp_ota_set_boot_partition(main_app);
+            if (err == ESP_OK) {
+                ESP_LOGI(TAG, "Rebooting to main firmware...");
+                vTaskDelay(pdMS_TO_TICKS(500));
+                esp_restart();
+            } else {
+                ESP_LOGE(TAG, "Failed to set boot partition: %s", esp_err_to_name(err));
+            }
+        } else {
+            ESP_LOGE(TAG, "No main app partition found! Staying in recovery.");
+        }
+    }
+    
+    // Button is held - stay in recovery mode
     ESP_LOGI(TAG, "===================================");
     ESP_LOGI(TAG, " ESP32 Recovery Mode (WiFi OTA)");
     ESP_LOGI(TAG, " Version: %s", RECOVERY_VERSION);
     ESP_LOGI(TAG, "===================================");
+    
+    // Initialize LED matrix for status display
+    if (led_init() == ESP_OK) {
+        // Start LED effect task
+        xTaskCreate(led_effect_task, "led_effect", 4096, NULL, 3, &s_led_task_handle);
+        led_set_mode(1);  // WiFi waiting mode (blue spinning)
+    }
     
     // Initialize NVS
     esp_err_t ret = nvs_flash_init();

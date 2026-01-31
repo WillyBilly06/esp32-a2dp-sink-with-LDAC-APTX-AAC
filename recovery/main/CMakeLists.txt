@@ -16,4 +16,5 @@ idf_component_register(
         esp-tls
         mbedtls
         lwip
+        driver
 )
