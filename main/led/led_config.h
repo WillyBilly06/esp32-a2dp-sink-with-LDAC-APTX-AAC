@@ -1,11 +1,10 @@
 #pragma once
 
-/*
- * led_config.h
- *
- * Configuration for the 16x16 WS2812B LED matrix.
- * All the sizing and timing constants live here.
- */
+// -----------------------------------------------------------
+// LED Matrix Configuration
+// 16x16 WS2812B matrix with audio-reactive effects
+// Uses SPI DMA driver for reliable LED output
+// -----------------------------------------------------------
 
 #include "sdkconfig.h"
 
@@ -84,7 +83,10 @@ enum LedEffectId {
     LED_EFFECT_BOUNCING_BALLS,       // Balls bounce to the beat
     LED_EFFECT_LAVA_LAMP,            // Blob-like lava lamp effect
     LED_EFFECT_AMBIENT,              // Ambient mode with configurable colors, gradient, speed
-    LED_EFFECT_VOLUME,               // Volume level visualizer
+    // === User-selectable effects end here ===
+    LED_EFFECT_USER_COUNT,           // Number of user-selectable effects (for cycling)
+    // === Internal/special effects below ===
+    LED_EFFECT_VOLUME = LED_EFFECT_USER_COUNT,  // Volume level visualizer (internal only)
     LED_EFFECT_COUNT                 // Total number of effects
 };
 
