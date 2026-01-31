@@ -1,11 +1,9 @@
 #pragma once
 
-/*
- * i2s_output.h
- *
- * Handles I2S output to the DAC. Always runs in 32-bit stereo mode
- * regardless of what the source format is.
- */
+// -----------------------------------------------------------
+// I2S Output - manages I2S driver for audio output
+// Always operates in 32-bit stereo mode
+// -----------------------------------------------------------
 
 #include <stdint.h>
 #include "freertos/FreeRTOS.h"
@@ -139,6 +137,10 @@ public:
         }
 
         i2s_start((i2s_port_t)APP_I2S_PORT);
+        
+        // Small delay to let I2S DMA stabilize after clock change
+        vTaskDelay(pdMS_TO_TICKS(10));
+        
         m_reconfig = false;
         unlock();
     }
@@ -165,7 +167,9 @@ public:
         
         size_t written = 0;
         lock();
-        i2s_write((i2s_port_t)APP_I2S_PORT, data, bytes, &written, portMAX_DELAY);
+        // Use timeout instead of portMAX_DELAY to prevent indefinite blocking
+        // during initialization race conditions
+        i2s_write((i2s_port_t)APP_I2S_PORT, data, bytes, &written, pdMS_TO_TICKS(100));
         unlock();
         return written;
     }
