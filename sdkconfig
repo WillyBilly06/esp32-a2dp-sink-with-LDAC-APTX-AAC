@@ -663,12 +663,6 @@ CONFIG_ENCODER_I2C_SDA_GPIO=23
 CONFIG_ENCODER_I2C_SCL_GPIO=22
 CONFIG_ENCODER_ADDR_QUAD=0x07
 # end of Rotary Encoder Configuration
-
-#
-# TWS (True Wireless Stereo) Configuration
-#
-# CONFIG_TWS_ENABLE is not set
-# end of TWS (True Wireless Stereo) Configuration
 # end of A2DP DSP BLE Configuration
 
 #
