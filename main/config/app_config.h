@@ -1,11 +1,9 @@
 #pragma once
 
-/*
- * app_config.h
- *
- * All the configurable parameters pulled from Kconfig.
- * Edit via 'idf.py menuconfig' instead of changing this file.
- */
+// -----------------------------------------------------------
+// Configuration header - pulls values from Kconfig
+// All configurable parameters are centralized here
+// -----------------------------------------------------------
 
 #include "sdkconfig.h"
 
@@ -58,7 +56,7 @@
 #define DSP_TREBLE_GAIN         1.0f
 #define DSP_PI_F                3.14159265f
 
-// BLE UUIDs (fixed, not configurable)
+// BLE UUIDs (fixed, not configurable) - Legacy
 #define BLE_SERVICE_UUID_LEVELS   "12345678-1234-1234-1234-1234567890ab"
 #define BLE_CHAR_UUID_LEVELS      "12345678-1234-1234-1234-1234567890ac"
 #define BLE_SERVICE_UUID_CONTROL  "12345678-1234-1234-1234-1234567890ad"
@@ -72,6 +70,12 @@
 #define BLE_CHAR_UUID_SOUND_DATA  "12345678-1234-1234-1234-1234567890b7"
 #define BLE_CHAR_UUID_OTA_CTRL    "12345678-1234-1234-1234-1234567890b1"
 #define BLE_CHAR_UUID_OTA_DATA    "12345678-1234-1234-1234-1234567890b2"
+
+// BLE Unified Protocol UUIDs (new architecture)
+#define BLE_UNIFIED_SERVICE_UUID  "12345678-1234-1234-1234-123456789000"
+#define BLE_UNIFIED_CHAR_CMD      "12345678-1234-1234-1234-123456789001"
+#define BLE_UNIFIED_CHAR_STATUS   "12345678-1234-1234-1234-123456789002"
+#define BLE_UNIFIED_CHAR_METER    "12345678-1234-1234-1234-123456789003"
 
 // OTA Constants
 #define APP_OTA_ACK_INTERVAL        4096
@@ -105,35 +109,3 @@
 #define APP_BLE_CHAR_UUID_OTA_CTRL    BLE_CHAR_UUID_OTA_CTRL
 #define APP_BLE_CHAR_UUID_OTA_DATA    BLE_CHAR_UUID_OTA_DATA
 
-// -----------------------------------------------------------
-// TWS (True Wireless Stereo) Configuration
-// -----------------------------------------------------------
-#ifdef CONFIG_TWS_ENABLE
-    #define APP_TWS_ENABLED             1
-    
-    #ifdef CONFIG_TWS_ROLE_PRIMARY
-        #define APP_TWS_ROLE            1  // Primary
-    #else
-        #define APP_TWS_ROLE            2  // Secondary
-    #endif
-    
-    #ifdef CONFIG_TWS_CHANNEL_LEFT
-        #define APP_TWS_CHANNEL         1  // Left
-    #else
-        #define APP_TWS_CHANNEL         2  // Right
-    #endif
-    
-    #define APP_TWS_SYNC_DELAY_MS       CONFIG_TWS_SYNC_DELAY_MS
-    
-    #ifdef CONFIG_TWS_FORCE_SBC
-        #define APP_TWS_FORCE_SBC       1
-    #else
-        #define APP_TWS_FORCE_SBC       0
-    #endif
-#else
-    #define APP_TWS_ENABLED             0
-    #define APP_TWS_ROLE                0  // Disabled
-    #define APP_TWS_CHANNEL             0  // Stereo
-    #define APP_TWS_SYNC_DELAY_MS       50
-    #define APP_TWS_FORCE_SBC           0
-#endif
