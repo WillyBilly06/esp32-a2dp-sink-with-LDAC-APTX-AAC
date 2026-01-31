@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Encrypt ESP32 firmware for secure OTA updates.
+ESP32 OTA Firmware Encryption Tool
+===================================
 
-This encrypts your firmware with AES-256-CBC so only devices with
-the matching key can install it. Works with the WiFi recovery mode.
+This script encrypts ESP32 firmware binaries using AES-256-CBC encryption.
+Only the recovery firmware with the matching key can decrypt and flash these files.
 
 Usage:
-    python encrypt_firmware.py firmware.bin --version 1.0.0
-    python encrypt_firmware.py --generate-key  # Make a new key
-    python encrypt_firmware.py --decrypt file.enc output.bin  # Test decryption
+    python encrypt_firmware.py input.bin --version 1.2.3
+    python encrypt_firmware.py --decrypt input.enc output.bin  # For testing
 
-Output goes to ota_releases/ folder:
-    - VERSION.enc (encrypted firmware)
-    - latest.txt (version info - you fill in the Google Drive file ID)
+Output files (in ota_releases folder):
+    - VERSION.enc (e.g., 1.0.0.enc) - Encrypted firmware
+    - latest.txt - Contains "VERSION,FILE_ID" (you fill in FILE_ID after upload)
 
-Make sure the key here matches the one in recovery_main.cpp!
+The encryption key MUST match the AES_KEY in recovery_main.cpp!
 """
 
 import sys
@@ -30,16 +30,14 @@ except ImportError:
     print("Install it with: pip install pycryptodome")
     sys.exit(1)
 
-# ------------------------------------------------------
-# IMPORTANT: Generate your own key and paste it here!
-# Run: python encrypt_firmware.py --generate-key
-# Then copy the output to both here AND recovery_main.cpp
-# ------------------------------------------------------
+# ============================================================
+# IMPORTANT: This key MUST match AES_KEY in recovery_main.cpp!
+# ============================================================
 AES_KEY = bytes([
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,  # <-- Replace with your key!
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x5A, 0x2B, 0x9C, 0x4E, 0x1F, 0x8D, 0x6A, 0x3C,
+    0x7B, 0x0E, 0x4F, 0x2D, 0x8C, 0x5A, 0x1B, 0x9E,
+    0x3D, 0x6C, 0x0F, 0x4A, 0x7E, 0x2B, 0x8D, 0x5C,
+    0x1A, 0x9F, 0x3E, 0x6B, 0x0D, 0x4C, 0x7A, 0x2E
 ])
 
 BLOCK_SIZE = 16
