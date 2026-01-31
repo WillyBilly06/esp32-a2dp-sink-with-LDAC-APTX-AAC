@@ -19,5 +19,3 @@ managed_components/
 # OS files
 .DS_Store
 Thumbs.db
-# OTA releases (encrypted firmware files - create your own)
-ota_releases/
