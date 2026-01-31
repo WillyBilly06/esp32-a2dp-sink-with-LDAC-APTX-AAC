@@ -1,12 +1,9 @@
 #pragma once
 
-/*
- * ble_gatt.h
- *
- * BLE GATT service for the phone app to control the speaker.
- * Handles advertising, connections, and reading/writing characteristics
- * for stuff like EQ settings, LED effects, and OTA updates.
- */
+// -----------------------------------------------------------
+// BLE GATT Service - manages Bluetooth Low Energy services
+// Handles advertising, connections, and characteristic I/O
+// -----------------------------------------------------------
 
 #include <stdint.h>
 #include <string.h>
