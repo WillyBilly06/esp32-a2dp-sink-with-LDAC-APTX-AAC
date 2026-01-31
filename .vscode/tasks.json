@@ -16,6 +16,51 @@
 			"isBackground": false,
 			"problemMatcher": [],
 			"group": "build"
+		},
+		{
+			"label": "Build v1.0.4",
+			"type": "shell",
+			"command": "D:\\esp-idf\\export.ps1; idf.py build"
+		},
+		{
+			"label": "Build v1.0.4 Bypass",
+			"type": "shell",
+			"command": "powershell -ExecutionPolicy Bypass -Command \"D:\\esp-idf\\export.ps1; idf.py build\""
+		},
+		{
+			"label": "Build ESP32 Script",
+			"type": "shell",
+			"command": "powershell -ExecutionPolicy Bypass -File D:\\esp32-a2dp-sink\\build_recovery.ps1"
+		},
+		{
+			"label": "Build Main App",
+			"type": "shell",
+			"command": "powershell -ExecutionPolicy Bypass -Command \". D:\\esp-idf\\export.ps1 *>$null; cd D:\\esp32-a2dp-sink; idf.py build 2>&1 | Select-Object -Last 30\""
+		},
+		{
+			"label": "Build via CMD",
+			"type": "shell",
+			"command": "cmd /c \"D:\\esp-idf\\export.bat & cd /d D:\\esp32-a2dp-sink & idf.py build\""
+		},
+		{
+			"label": "Build Main BAT",
+			"type": "shell",
+			"command": "D:\\esp32-a2dp-sink\\build_main.bat"
+		},
+		{
+			"label": "Encrypt Firmware",
+			"type": "shell",
+			"command": "powershell -ExecutionPolicy Bypass -File D:\\esp32-a2dp-sink\\encrypt_firmware.ps1"
+		},
+		{
+			"label": "Flash Firmware",
+			"type": "shell",
+			"command": "cmd /c \"D:\\esp-idf\\export.bat & cd /d D:\\esp32-a2dp-sink & idf.py -p COM10 flash\""
+		},
+		{
+			"label": "Flash Main",
+			"type": "shell",
+			"command": "D:\\esp32-a2dp-sink\\flash_main.bat"
 		}
 	]
 }
