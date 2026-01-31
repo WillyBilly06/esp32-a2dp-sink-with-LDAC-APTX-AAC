@@ -1,11 +1,8 @@
 #pragma once
 
-/*
- * nvs_settings.h
- *
- * Saves and loads user settings from NVS flash.
- * Things like device name, EQ settings, control flags, etc.
- */
+// -----------------------------------------------------------
+// NVS Settings - persistent storage for device configuration
+// -----------------------------------------------------------
 
 #include <string>
 #include <stdint.h>
@@ -120,13 +117,24 @@ public:
     // Save EQ settings
     bool saveEQ(int8_t bass, int8_t mid, int8_t treble) {
         nvs_handle_t h;
-        if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return false;
+        if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
+            ESP_LOGE(TAG, "saveEQ: NVS open failed!");
+            return false;
+        }
         nvs_set_i8(h, NVS_KEY_EQ_BASS, bass);
         nvs_set_i8(h, NVS_KEY_EQ_MID, mid);
         nvs_set_i8(h, NVS_KEY_EQ_TREB, treble);
-        nvs_commit(h);
+        esp_err_t err = nvs_commit(h);
         nvs_close(h);
-        return true;
+        
+        // Update in-memory cache
+        m_settings.eqBassDB = bass;
+        m_settings.eqMidDB = mid;
+        m_settings.eqTrebleDB = treble;
+        
+        ESP_LOGI(TAG, "saveEQ: saved EQ(%d,%d,%d) to NVS, commit=%s", 
+                 bass, mid, treble, esp_err_to_name(err));
+        return err == ESP_OK;
     }
 
     // Save device name
@@ -181,6 +189,27 @@ public:
         nvs_set_u8(h, "sound_muted", muted ? 1 : 0);
         nvs_commit(h);
         nvs_close(h);
+        return true;
+    }
+
+    // Load 3D sound enabled state from NVS
+    bool load3DSound() {
+        nvs_handle_t h;
+        if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return false;
+        uint8_t enabled = 0;
+        nvs_get_u8(h, "3d_sound", &enabled);
+        nvs_close(h);
+        return enabled != 0;
+    }
+
+    // Save 3D sound enabled state to NVS
+    bool save3DSound(bool enabled) {
+        nvs_handle_t h;
+        if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return false;
+        nvs_set_u8(h, "3d_sound", enabled ? 1 : 0);
+        nvs_commit(h);
+        nvs_close(h);
+        ESP_LOGI(TAG, "save3DSound: saved %s to NVS", enabled ? "ON" : "OFF");
         return true;
     }
 
