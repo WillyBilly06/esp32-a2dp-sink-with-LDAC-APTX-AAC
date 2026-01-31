@@ -1,11 +1,10 @@
 #pragma once
 
-/*
- * led_controller.h
- *
- * Controls the 16x16 LED matrix. Handles effect switching, demo mode
- * when no music is playing, and syncs with the audio for reactive effects.
- */
+// -----------------------------------------------------------
+// LED Controller
+// Manages effects, demo mode switching, and audio integration
+// Uses SPI DMA driver for reliable LED output
+// -----------------------------------------------------------
 
 #include <stdint.h>
 #include "freertos/FreeRTOS.h"
@@ -103,7 +102,7 @@ public:
     }
     
     void nextEffect() {
-        m_currentEffect = (m_currentEffect + 1) % LED_EFFECT_COUNT;
+        m_currentEffect = (m_currentEffect + 1) % LED_EFFECT_USER_COUNT;
         
         LedEffect* effect = getCurrentEffect();
         if (effect) {
@@ -116,9 +115,13 @@ public:
     
     void previousEffect() {
         if (m_currentEffect == 0) {
-            m_currentEffect = LED_EFFECT_COUNT - 1;
+            m_currentEffect = LED_EFFECT_USER_COUNT - 1;
         } else {
             m_currentEffect--;
+            // Ensure we don't go past user-selectable effects
+            if (m_currentEffect >= LED_EFFECT_USER_COUNT) {
+                m_currentEffect = LED_EFFECT_USER_COUNT - 1;
+            }
         }
         
         LedEffect* effect = getCurrentEffect();
@@ -133,6 +136,7 @@ public:
     void setEffect(int effectId, bool save = true) {
         if (effectId >= 0 && effectId < LED_EFFECT_COUNT) {
             m_currentEffect = effectId;
+            m_ledSettings[9] = (uint8_t)effectId;  // Also update LED settings array
             LedEffect* effect = getCurrentEffect();
             if (effect) {
                 effect->init(&m_driver);
@@ -152,6 +156,7 @@ public:
     
     void setBrightness(uint8_t brightness, bool save = false) {
         m_brightness = brightness;
+        m_ledSettings[0] = brightness;  // Keep ledSettings in sync
         // Also update Ambient effect if active
         if (m_currentEffect == LED_EFFECT_AMBIENT) {
             AmbientEffect* ambient = static_cast<AmbientEffect*>(m_effects[LED_EFFECT_AMBIENT]);
@@ -218,9 +223,13 @@ public:
     }
     
     void saveBrightness() {
+        // Ensure m_ledSettings is in sync
+        m_ledSettings[0] = m_brightness;
+        
         nvs_handle_t handle;
         if (nvs_open("led", NVS_READWRITE, &handle) == ESP_OK) {
             nvs_set_u8(handle, "bright", m_brightness);
+            nvs_set_blob(handle, "settings", m_ledSettings, 10);  // Also save blob for consistency
             nvs_commit(handle);
             nvs_close(handle);
             ESP_LOGI(LED_TAG, "Saved brightness: %d", m_brightness);
@@ -294,7 +303,7 @@ public:
         
         uint32_t fadeElapsed = elapsedMs - VOLUME_OVERLAY_HOLD_MS;
         uint32_t fadeDuration = VOLUME_OVERLAY_DURATION_MS - VOLUME_OVERLAY_HOLD_MS;
-        return 1.0f - (float)fadeElapsed / (float)fadeDuration;
+        return 1.0f - (float)fadeElapsed * fast_recipsf2((float)fadeDuration);
     }
     
     // Render EQ overlay - shows 3 vertical bars for bass/mid/treble
@@ -416,7 +425,7 @@ public:
         // Calculate pulse phase (0-1, repeating every PAIRING_PULSE_PERIOD_MS)
         TickType_t elapsed = xTaskGetTickCount() - m_pairingModeStart;
         uint32_t elapsedMs = pdTICKS_TO_MS(elapsed);
-        float phase = (float)(elapsedMs % PAIRING_PULSE_PERIOD_MS) / (float)PAIRING_PULSE_PERIOD_MS;
+        float phase = (float)(elapsedMs % PAIRING_PULSE_PERIOD_MS) * fast_recipsf2((float)PAIRING_PULSE_PERIOD_MS);
         
         // Sine wave for smooth pulsing (0.2 to 1.0 range for visibility)
         float sineVal = sinf(phase * 2.0f * M_PI);
@@ -508,7 +517,7 @@ public:
         // Fade out over remaining time
         uint32_t fadeElapsed = elapsedMs - VOLUME_OVERLAY_HOLD_MS;
         uint32_t fadeDuration = VOLUME_OVERLAY_DURATION_MS - VOLUME_OVERLAY_HOLD_MS;
-        return 1.0f - (float)fadeElapsed / (float)fadeDuration;
+        return 1.0f - (float)fadeElapsed * fast_recipsf2((float)fadeDuration);
     }
     
     // Render volume overlay on the LED matrix
@@ -527,7 +536,7 @@ public:
         }
         
         // Smooth the displayed volume
-        float targetVol = m_volumeDisplayTarget / 127.0f;
+        float targetVol = m_volumeDisplayTarget * fast_recipsf2(127.0f);
         m_volumeDisplaySmooth += (targetVol - m_volumeDisplaySmooth) * 0.3f;
         
         m_driver.clear();
@@ -555,7 +564,7 @@ public:
             
             if (row < filledRows) {
                 // Color gradient: white -> red (bottom to top)
-                float rowPct = (float)row / (float)(LED_MATRIX_HEIGHT - 1);
+                float rowPct = (float)row * fast_recipsf2((float)(LED_MATRIX_HEIGHT - 1));
                 uint8_t r, g, b;
                 
                 // White (255,255,255) at bottom, Red (255,0,0) at top
@@ -572,7 +581,7 @@ public:
                 // Fill the row with a slight gradient from center outward
                 for (int col = 0; col < LED_MATRIX_WIDTH; col++) {
                     // Center columns brighter
-                    float colDist = fabsf(col - (LED_MATRIX_WIDTH - 1) / 2.0f) / ((LED_MATRIX_WIDTH - 1) / 2.0f);
+                    float colDist = fabsf(col - (LED_MATRIX_WIDTH - 1) * 0.5f) * fast_recipsf2((LED_MATRIX_WIDTH - 1) * 0.5f);
                     float colFade = 1.0f - colDist * 0.3f;  // 70% brightness at edges
                     
                     RGB_SPI color = {
@@ -781,41 +790,64 @@ private:
     void loadSettings() {
         nvs_handle_t handle;
         if (nvs_open("led", NVS_READONLY, &handle) == ESP_OK) {
-            int32_t effect = 0;
-            if (nvs_get_i32(handle, "effect", &effect) == ESP_OK) {
-                if (effect >= 0 && effect < LED_EFFECT_COUNT) {
-                    m_currentEffect = effect;
-                }
-            }
-            
-            uint8_t brightness = LED_DEFAULT_BRIGHTNESS;
-            if (nvs_get_u8(handle, "bright", &brightness) == ESP_OK) {
-                m_brightness = brightness;
-            }
-            
-            // Load full LED settings if available
+            // First try to load the blob (has all settings)
             size_t len = 10;
+            bool blobLoaded = false;
             if (nvs_get_blob(handle, "settings", m_ledSettings, &len) == ESP_OK && len == 10) {
+                // Blob has: [brightness, r1, g1, b1, r2, g2, b2, gradient, speed, effectId]
+                m_brightness = m_ledSettings[0];
+                m_currentEffect = m_ledSettings[9];
+                if (m_currentEffect >= LED_EFFECT_COUNT) {
+                    m_currentEffect = 0;
+                }
+                blobLoaded = true;
+                ESP_LOGI(LED_TAG, "Loaded LED settings blob: effect=%d, brightness=%d", m_currentEffect, m_brightness);
+                
                 // Apply to Ambient effect
                 AmbientEffect* ambient = static_cast<AmbientEffect*>(m_effects[LED_EFFECT_AMBIENT]);
                 if (ambient) {
                     ambient->setSettings(m_ledSettings, 10);
                 }
-                ESP_LOGI(LED_TAG, "Loaded LED settings blob");
+            }
+            
+            // Fallback: load individual keys if blob not available (legacy support)
+            if (!blobLoaded) {
+                int32_t effect = 0;
+                if (nvs_get_i32(handle, "effect", &effect) == ESP_OK) {
+                    if (effect >= 0 && effect < LED_EFFECT_COUNT) {
+                        m_currentEffect = effect;
+                    }
+                }
+                
+                uint8_t brightness = LED_DEFAULT_BRIGHTNESS;
+                if (nvs_get_u8(handle, "bright", &brightness) == ESP_OK) {
+                    m_brightness = brightness;
+                }
+                
+                // Sync m_ledSettings with loaded values
+                m_ledSettings[0] = m_brightness;
+                m_ledSettings[9] = (uint8_t)m_currentEffect;
+                
+                ESP_LOGI(LED_TAG, "Loaded settings from keys: effect=%d, brightness=%d", m_currentEffect, m_brightness);
             }
             
             nvs_close(handle);
-            ESP_LOGI(LED_TAG, "Loaded settings: effect=%d, brightness=%d", m_currentEffect, m_brightness);
         }
     }
     
     void saveSettings() {
+        // Ensure m_ledSettings is in sync
+        m_ledSettings[0] = m_brightness;
+        m_ledSettings[9] = (uint8_t)m_currentEffect;
+        
         nvs_handle_t handle;
         if (nvs_open("led", NVS_READWRITE, &handle) == ESP_OK) {
             nvs_set_i32(handle, "effect", m_currentEffect);
             nvs_set_u8(handle, "bright", m_brightness);
+            nvs_set_blob(handle, "settings", m_ledSettings, 10);
             nvs_commit(handle);
             nvs_close(handle);
+            ESP_LOGI(LED_TAG, "Saved settings: effect=%d, brightness=%d", m_currentEffect, m_brightness);
         }
     }
     
@@ -823,6 +855,9 @@ public:
     // Startup animation - colorful spiral wipe (public so main can trigger it)
     void playStartupAnimation() {
         ESP_LOGI(LED_TAG, "Playing startup animation...");
+        
+        // Fixed brightness for startup animation (15% = 38/255)
+        const uint8_t startupBrightness = 38;
         
         const int totalFrames = 60;  // ~2 seconds at 30fps
         const int spiralSteps = LED_MATRIX_WIDTH * LED_MATRIX_HEIGHT;
@@ -842,7 +877,7 @@ public:
             for (int i = 0; i < ledsToShow && i < spiralSteps; i++) {
                 // Rainbow color based on position
                 uint8_t hue = (i * 256 / spiralSteps + frame * 4) & 0xFF;
-                uint8_t brightness = m_brightness;
+                uint8_t brightness = startupBrightness;
                 RGB color = RGB::fromHSV(hue, 255, brightness);
                 
                 m_driver.setPixelXY(x, y, color);
@@ -860,15 +895,15 @@ public:
                 y += dy;
             }
             
-            m_driver.setBrightness(m_brightness);
+            m_driver.setBrightness(startupBrightness);
             m_driver.show();
             vTaskDelay(pdMS_TO_TICKS(33));  // ~30fps
         }
         
         // Phase 2: Color pulse from center
         for (int frame = 0; frame < totalFrames / 4; frame++) {
-            float cx = (LED_MATRIX_WIDTH - 1) / 2.0f;
-            float cy = (LED_MATRIX_HEIGHT - 1) / 2.0f;
+            float cx = (LED_MATRIX_WIDTH - 1) * 0.5f;
+            float cy = (LED_MATRIX_HEIGHT - 1) * 0.5f;
             float maxDist = sqrtf(cx * cx + cy * cy);
             float pulse = (float)frame / (totalFrames / 4);
             
@@ -876,14 +911,14 @@ public:
                 for (int x = 0; x < LED_MATRIX_WIDTH; x++) {
                     float dx = x - cx;
                     float dy = y - cy;
-                    float dist = sqrtf(dx * dx + dy * dy) / maxDist;
+                    float dist = sqrtf(dx * dx + dy * dy) * fast_recipsf2(maxDist);
                     
                     // Wave effect from center
                     float wave = sinf((dist - pulse * 2) * 6.28f);
                     if (wave < 0) wave = 0;
                     
                     uint8_t hue = (uint8_t)((dist * 128 + frame * 8) * 255) & 0xFF;
-                    uint8_t v = (uint8_t)(wave * m_brightness);
+                    uint8_t v = (uint8_t)(wave * startupBrightness);
                     
                     RGB color = RGB::fromHSV(hue, 255, v);
                     m_driver.setPixelXY(x, y, color);
@@ -898,7 +933,7 @@ public:
         // Phase 3: Quick flash and fade
         for (int frame = 0; frame < totalFrames / 4; frame++) {
             float fade = 1.0f - (float)frame / (totalFrames / 4);
-            uint8_t v = (uint8_t)(fade * m_brightness);
+            uint8_t v = (uint8_t)(fade * startupBrightness);
             
             // Cyan/white flash
             RGB color = RGB(v / 2, v, v);
@@ -996,6 +1031,7 @@ struct LedAudioReadings {
 // Automatic Gain Control (AGC) for LED effects
 // Ultra-aggressive normalization for 1% volume support
 // Uses dB-domain processing for proper low-level handling
+// NEW: Fixed floor normalization - always boost to minimum target level
 // -----------------------------------------------------------
 struct AudioAGC {
     // Running peak in dB domain (much better for quiet audio)
@@ -1003,12 +1039,13 @@ struct AudioAGC {
     float peakDbMid = -60.0f;
     float peakDbHigh = -60.0f;
     
-    // AGC parameters
-    float targetDb = -6.0f;      // Target output level (-6dB = 0.5 linear)
-    float attackRate = 0.3f;     // Fast attack to catch beats
-    float decayRate = 0.9995f;   // Very slow decay (keeps gain high for quiet parts)
-    float minInputDb = -80.0f;   // Minimum detectable input (-80dB = 0.0001 linear)
-    float maxGainDb = 60.0f;     // Maximum gain in dB (60dB = 1000x amplification!)
+    // AGC parameters - MORE AGGRESSIVE for 1% volume support
+    float targetDb = -3.0f;      // Target output level (-3dB = 0.7 linear = 70%)
+    float minFloorLin = 0.7f;    // FIXED MINIMUM: Always boost audio to at least 70% for LEDs
+    float attackRate = 0.4f;     // Faster attack to catch beats at low volume
+    float decayRate = 0.999f;    // Slower decay (keeps gain high for quiet parts)
+    float minInputDb = -100.0f;  // Minimum detectable input (-100dB for 1% volume support)
+    float maxGainDb = 80.0f;     // Maximum gain in dB (80dB = 10000x amplification for 1% volume!)
     
     void updatePeaks(float bassLin, float midLin, float highLin) {
         // Convert linear to dB with floor
@@ -1057,7 +1094,7 @@ struct AudioAGC {
         // Convert dB back to linear
         auto dbToLin = [](float db) -> float {
             if (db < -120.0f) return 0.0f;
-            return powf(10.0f, db / 20.0f);
+            return powf(10.0f, db * fast_recipsf2(20.0f));
         };
         
         // Calculate required gain in dB to reach target
@@ -1065,7 +1102,7 @@ struct AudioAGC {
         float gainDbMid = targetDb - peakDbMid;
         float gainDbHigh = targetDb - peakDbHigh;
         
-        // Clamp gain to maximum (60dB = 1000x)
+        // Clamp gain to maximum (80dB = 10000x for 1% volume support)
         if (gainDbBass > maxGainDb) gainDbBass = maxGainDb;
         if (gainDbMid > maxGainDb) gainDbMid = maxGainDb;
         if (gainDbHigh > maxGainDb) gainDbHigh = maxGainDb;
@@ -1083,6 +1120,19 @@ struct AudioAGC {
         bass = dbToLin(bassDb);
         mid = dbToLin(midDb);
         high = dbToLin(highDb);
+        
+        // FIXED FLOOR NORMALIZATION: Ensure minimum level for LED reactivity
+        // This guarantees LEDs react even at 1% volume by scaling to minimum floor
+        float maxLevel = (bass > mid) ? bass : mid;
+        if (high > maxLevel) maxLevel = high;
+        
+        if (maxLevel > 0.001f && maxLevel < minFloorLin) {
+            // Scale all bands proportionally to reach minimum floor
+            float scale = minFloorLin * fast_recipsf2(maxLevel);
+            bass *= scale;
+            mid *= scale;
+            high *= scale;
+        }
         
         // Clamp to 0-1 range
         if (bass > 1.0f) bass = 1.0f;
@@ -1104,6 +1154,10 @@ static void __attribute__((noinline)) readDspData(LedAudioReadings& r) {
     r.audioPlaying = false;
     
     if (g_ledDsp) {
+        // Get LED audio boost factor (increases as volume decreases)
+        // At low volumes, boost audio levels so LEDs can still react
+        float ledBoost = g_ledDsp->getLedAudioBoost();
+        
         r.bassDb = g_ledDsp->getGoertzel30dB();
         r.midDb = g_ledDsp->getGoertzel60dB();
         r.highDb = g_ledDsp->getGoertzel100dB();
@@ -1112,6 +1166,12 @@ static void __attribute__((noinline)) readDspData(LedAudioReadings& r) {
         float rawBass = g_ledDsp->getGoertzel30Lin() + g_ledDsp->getGoertzel60Lin();
         float rawMid = g_ledDsp->getGoertzel100Lin();
         float rawHigh = g_ledDsp->getPeakLin(2);
+        
+        // Apply LED audio boost for low volume visibility
+        // This allows LEDs to react even at 1-2% volume
+        rawBass *= ledBoost;
+        rawMid *= ledBoost;
+        rawHigh *= ledBoost;
         
         if (rawBass > 1.0f) rawBass = 1.0f;
         if (rawMid > 1.0f) rawMid = 1.0f;

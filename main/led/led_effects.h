@@ -1,18 +1,18 @@
 #pragma once
 
-/*
- * led_effects.h
- *
- * All the LED effects live here - spectrum analyzer, VU meter, fire,
- * plasma, starfield, etc. They react to the audio in real-time.
- * Optimized to avoid divisions (all bit shifts and multiplies).
- */
+// -----------------------------------------------------------
+// LED Effects Engine
+// Audio-reactive effects for 16x16 WS2812B matrix
+// OPTIMIZED: No divisions - all bit shifts and multiplies
+// Uses SPI DMA driver for reliable LED output
+// -----------------------------------------------------------
 
 #include <stdint.h>
 #include <math.h>
 #include <stdlib.h>
 #include "led_config.h"
 #include "led_driver_spi.h"
+#include "../dsp/fast_math.h"
 
 // Use SPI driver types
 typedef LedDriverSPI LedDriver;
@@ -1363,7 +1363,7 @@ public:
                 // Distance from center for radial gradient
                 float dx = x - 7.5f, dy = y - 7.5f;
                 float dist = sqrtf(dx * dx + dy * dy);
-                float falloff = 1.0f - (dist / 11.0f);
+                float falloff = 1.0f - (dist * fast_recipsf2(11.0f));
                 if (falloff < 0.1f) falloff = 0.1f;
                 
                 uint8_t pixelBright = scale8(brightness, (uint8_t)(falloff * 255));
@@ -1376,7 +1376,7 @@ public:
     void updateDemo() override {
         m_frame++;
         AudioData demo;
-        float breath = sin8(m_frame * 2) / 255.0f;
+        float breath = sin8(m_frame * 2) * fast_recipsf2(255.0f);
         demo.bass = breath * 0.6f + 0.2f;
         demo.mid = breath * 0.4f + 0.1f;
         demo.high = breath * 0.3f;
@@ -1482,7 +1482,7 @@ public:
         // Add new sample based on audio mix
         float sample = audio.bass * 0.5f + audio.mid * 0.3f + audio.high * 0.2f;
         // Add some "noise" based on high frequency for texture
-        sample += (random8() / 255.0f - 0.5f) * audio.high * 0.3f;
+        sample += (random8() * fast_recipsf2(255.0f) - 0.5f) * audio.high * 0.3f;
         
         int newY = 8 + (int)(sample * 7);
         if (newY < 0) newY = 0;
@@ -1556,7 +1556,7 @@ public:
     void spawnBall(int idx) {
         m_balls[idx].x = random8(4, 12);
         m_balls[idx].y = random8(4, 12);
-        m_balls[idx].vx = (random8() / 255.0f - 0.5f) * 0.5f;
+        m_balls[idx].vx = (random8() * fast_recipsf2(255.0f) - 0.5f) * 0.5f;
         m_balls[idx].vy = 0;
         m_balls[idx].hue = random8();
         m_balls[idx].radius = 1 + random8(2);
@@ -1655,8 +1655,8 @@ public:
         for (int i = 0; i < NUM_BLOBS; i++) {
             m_blobs[i].x = random8(4, 12);
             m_blobs[i].y = random8(4, 12);
-            m_blobs[i].vx = (random8() / 255.0f - 0.5f) * 0.3f;
-            m_blobs[i].vy = (random8() / 255.0f - 0.5f) * 0.3f;
+            m_blobs[i].vx = (random8() * fast_recipsf2(255.0f) - 0.5f) * 0.3f;
+            m_blobs[i].vy = (random8() * fast_recipsf2(255.0f) - 0.5f) * 0.3f;
             m_blobs[i].radius = 3.0f + random8(3);
             m_blobs[i].hue = random8();
         }
@@ -1784,7 +1784,7 @@ public:
         m_frame++;
         
         // Animation phase based on speed (0-255 maps to slow-fast)
-        float speedFactor = (m_speed / 255.0f) * 0.1f;
+        float speedFactor = (m_speed * fast_recipsf2(255.0f)) * 0.1f;
         m_phase += speedFactor;
         if (m_phase > 1.0f) m_phase -= 1.0f;
         
@@ -1842,7 +1842,7 @@ private:
     }
     
     RGB applyBrightness(RGB c) {
-        float scale = m_brightness / 255.0f;
+        float scale = m_brightness * fast_recipsf2(255.0f);
         return RGB((uint8_t)(c.r * scale), (uint8_t)(c.g * scale), (uint8_t)(c.b * scale));
     }
     
@@ -1877,8 +1877,8 @@ private:
     }
     
     void renderRadial() {
-        float cx = (LED_MATRIX_WIDTH - 1) / 2.0f;
-        float cy = (LED_MATRIX_HEIGHT - 1) / 2.0f;
+        float cx = (LED_MATRIX_WIDTH - 1) * 0.5f;
+        float cy = (LED_MATRIX_HEIGHT - 1) * 0.5f;
         float maxDist = sqrtf(cx * cx + cy * cy);
         
         for (int y = 0; y < LED_MATRIX_HEIGHT; y++) {
@@ -1886,7 +1886,7 @@ private:
                 float dx = x - cx;
                 float dy = y - cy;
                 float dist = sqrtf(dx * dx + dy * dy);
-                float t = dist / maxDist;
+                float t = dist * fast_recipsf2(maxDist);
                 RGB color = lerpColor(m_color1, m_color2, t);
                 m_driver->setPixelXY(x, y, applyBrightness(color));
             }
@@ -1895,9 +1895,10 @@ private:
     
     void renderDiagonal() {
         float maxDiag = (float)(LED_MATRIX_WIDTH + LED_MATRIX_HEIGHT - 2);
+        float invMaxDiag = fast_recipsf2(maxDiag);
         for (int y = 0; y < LED_MATRIX_HEIGHT; y++) {
             for (int x = 0; x < LED_MATRIX_WIDTH; x++) {
-                float t = (float)(x + y) / maxDiag;
+                float t = (float)(x + y) * invMaxDiag;
                 RGB color = lerpColor(m_color1, m_color2, t);
                 m_driver->setPixelXY(x, y, applyBrightness(color));
             }
@@ -1922,7 +1923,7 @@ public:
     
     void setVolume(uint8_t volume) {
         // Volume is 0-127 (A2DP range), convert to 0.0-1.0
-        m_targetVolume = volume / 127.0f;
+        m_targetVolume = volume * fast_recipsf2(127.0f);
         m_lastChangeTime = m_frame;
     }
     
@@ -1939,7 +1940,7 @@ public:
         uint32_t sinceLast = m_frame - m_lastChangeTime;
         float pulse = 0.0f;
         if (sinceLast < 30) {  // ~1 second of pulsing
-            pulse = sinf(sinceLast * 0.3f) * (1.0f - sinceLast / 30.0f);
+            pulse = sinf(sinceLast * 0.3f) * (1.0f - sinceLast * fast_recipsf2(30.0f));
         }
         
         m_pulsePhase += 0.05f;
