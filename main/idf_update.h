@@ -1,12 +1,5 @@
 #pragma once
 
-/*
- * idf_update.h
- *
- * OTA update wrapper. Handles the low-level flash operations
- * for writing new firmware over the air.
- */
-
 #include <stddef.h>
 #include <stdint.h>
 

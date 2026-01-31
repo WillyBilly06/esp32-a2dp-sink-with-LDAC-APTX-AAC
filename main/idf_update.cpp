@@ -1,10 +1,3 @@
-/*
- * idf_update.cpp
- *
- * Implementation of the OTA update wrapper.
- * Does all the boring flash erase/write stuff.
- */
-
 #include "idf_update.h"
 
 #include <string.h>
@@ -59,9 +52,24 @@ bool IdfUpdate::begin(size_t size, const char *label) {
         }
     } else {
         // Standard 2-partition OTA scheme (ota_0 + ota_1).
-        // esp_ota_get_next_update_partition() automatically selects the other partition.
+        // We have a 3-partition setup (recovery, ota_0, ota_1) but OTA should only
+        // alternate between ota_0 and ota_1, never targeting recovery.
         const esp_partition_t *running = esp_ota_get_running_partition();
-        part = esp_ota_get_next_update_partition(NULL);
+        
+        // Determine the target partition explicitly based on current partition
+        if (running) {
+            if (strcmp(running->label, "ota_0") == 0) {
+                part = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_1, NULL);
+            } else if (strcmp(running->label, "ota_1") == 0) {
+                part = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
+            } else {
+                // Running from recovery - target ota_0
+                part = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
+            }
+        } else {
+            // Fallback: target ota_0
+            part = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
+        }
         
         if (!part) {
             ESP_LOGE(TAG_UPDATE, "No OTA partition found for update");
