@@ -1,11 +1,9 @@
 #pragma once
 
-/*
- * ota_handler.h
- *
- * Handles BLE-based OTA firmware updates. Buffers incoming packets
- * before starting the flash write to avoid issues with slow BLE.
- */
+// -----------------------------------------------------------
+// OTA Handler - manages over-the-air firmware updates via BLE
+// Implements pre-begin buffering and packet coalescing
+// -----------------------------------------------------------
 
 #include <stdint.h>
 #include <string.h>
