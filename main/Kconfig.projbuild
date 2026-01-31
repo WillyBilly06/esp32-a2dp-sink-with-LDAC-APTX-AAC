@@ -145,7 +145,7 @@ menu "A2DP DSP BLE Configuration"
 
         config FIRMWARE_VERSION
             string "Firmware version"
-            default "1.2.0"
+            default "1.0.3"
             help
                 Firmware version string reported via BLE.
     endmenu
@@ -287,86 +287,6 @@ menu "A2DP DSP BLE Configuration"
             help
                 I2C address for the Quad Rotary Encoder Breakout.
                 Default 0x07 (user configured).
-    endmenu
-
-    menu "TWS (True Wireless Stereo) Configuration"
-        config TWS_ENABLE
-            bool "Enable TWS Mode"
-            default n
-            help
-                Enable True Wireless Stereo mode using ESP-NOW.
-                This allows two ESP32 devices to work together as a stereo pair.
-                When enabled, forces SBC codec for consistent timing.
-                
-                WARNING: WiFi and BLE will coexist but may have reduced performance.
-
-        choice TWS_ROLE
-            prompt "TWS Role"
-            default TWS_ROLE_PRIMARY
-            depends on TWS_ENABLE
-            help
-                Select the role for this device in TWS mode.
-
-            config TWS_ROLE_PRIMARY
-                bool "Primary (receives A2DP from phone)"
-                help
-                    Primary device receives Bluetooth audio from the phone
-                    and forwards one channel to the secondary device via ESP-NOW.
-
-            config TWS_ROLE_SECONDARY
-                bool "Secondary (receives audio from primary)"
-                help
-                    Secondary device receives audio from the primary device
-                    via ESP-NOW and outputs it to I2S.
-        endchoice
-
-        choice TWS_CHANNEL
-            prompt "Local Audio Channel"
-            default TWS_CHANNEL_LEFT
-            depends on TWS_ENABLE
-            help
-                Select which audio channel this device plays.
-
-            config TWS_CHANNEL_LEFT
-                bool "Left channel"
-                help
-                    This device plays the left audio channel.
-                    The partner device plays the right channel.
-
-            config TWS_CHANNEL_RIGHT
-                bool "Right channel"
-                help
-                    This device plays the right audio channel.
-                    The partner device plays the left channel.
-        endchoice
-
-        config TWS_SYNC_DELAY_MS
-            int "Sync buffer delay (ms)"
-            default 50
-            range 10 200
-            depends on TWS_ENABLE
-            help
-                Delay added to primary playback to sync with secondary.
-                Higher values improve sync but add latency.
-                50ms is a good balance for most cases.
-
-        config TWS_PEER_MAC
-            string "Partner device MAC address (optional)"
-            default ""
-            depends on TWS_ENABLE
-            help
-                If set, skip pairing and connect directly to this MAC.
-                Format: "AA:BB:CC:DD:EE:FF"
-                Leave empty to use automatic pairing.
-
-        config TWS_FORCE_SBC
-            bool "Force SBC codec in TWS mode"
-            default y
-            depends on TWS_ENABLE
-            help
-                When enabled, disables LDAC/aptX/AAC codecs in TWS mode
-                and forces SBC for consistent timing between devices.
-                Recommended for better sync.
     endmenu
 
 endmenu
