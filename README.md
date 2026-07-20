@@ -12,6 +12,33 @@
 
 ---
 
+> ## This repository is superseded
+>
+> Active development has moved to
+> **[ESP32-A2DP-SINK-WITH-CODECS-UPDATED](https://github.com/WillyBilly06/ESP32-A2DP-SINK-WITH-CODECS-UPDATED)**.
+>
+> **New projects should start there.** This repository targets ESP-IDF v5.1.4 and is kept
+> for reference and for existing builds; it no longer receives updates.
+>
+> | | This repo | Updated repo |
+> |:--|:--|:--|
+> | ESP-IDF | v5.1.4 | v5.5.2 |
+> | Target module | ESP32-WROVER | ESP32-WROOM |
+> | PSRAM | Required | Not required (runs on internal SRAM) |
+> | Codecs | LDAC, aptX HD, aptX, aptX-LL, AAC, SBC | adds **Opus** |
+> | Bluetooth stack | Stock Bluedroid + codec patches | Patched stack with native A2DP handling |
+>
+> **Which branch to use over there:**
+>
+> - [`main`](https://github.com/WillyBilly06/ESP32-A2DP-SINK-WITH-CODECS-UPDATED/tree/main) —
+>   ESP32-WROOM, internal SRAM only. Start here unless you need one of the below.
+> - [`PSRAM-only`](https://github.com/WillyBilly06/ESP32-A2DP-SINK-WITH-CODECS-UPDATED/tree/PSRAM-only) —
+>   the closest match to *this* repo's setup. **If you are running WROVER hardware with PSRAM, use this branch.**
+> - [`second-i2s-wm8805-spdif`](https://github.com/WillyBilly06/ESP32-A2DP-SINK-WITH-CODECS-UPDATED/tree/second-i2s-wm8805-spdif) —
+>   adds a second I2S output with WM8805 S/PDIF.
+
+---
+
 ## Table of Contents
 
 - [Features](#features)
@@ -145,6 +172,12 @@ Note: Replace COM10 or /dev/ttyUSB0 with your actual serial port.
 ---
 
 ## Building from Source
+
+> **Before you start:** these steps build the ESP-IDF v5.1.4 version and involve manually
+> assembling the toolchain and codec libraries. The
+> [updated repository](https://github.com/WillyBilly06/ESP32-A2DP-SINK-WITH-CODECS-UPDATED)
+> builds against ESP-IDF v5.5.2 with a simpler setup. Follow the steps below only if you
+> specifically need the 5.1.4 build.
 
 ### Step 1: Clone ESP-IDF with Codec Support
 
